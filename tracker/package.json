@@ -1,0 +1,11 @@
+{
+  "name": "zemenay-email-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2"
+  }
+}

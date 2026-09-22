@@ -1,0 +1,28 @@
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+tracker/.env
+tracker/.env.*
+!tracker/.env.example
+
+# Dependencies
+node_modules/
+tracker/node_modules/
+
+# Vercel local project files
+.vercel/
+tracker/.vercel/
+
+# Logs and test output
+*.log
+coverage/
+tmp/
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

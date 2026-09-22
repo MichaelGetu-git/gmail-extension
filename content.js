@@ -4,6 +4,50 @@
 
 // ---------------------------------------------------------------- Gmail DOM
 
+const BRAND = {
+  name: "ZemenayTech",
+  website: "https://zemenaytech.com/",
+  logoUrl: "https://zemenaytech.com/logo/logo.svg",
+  blue: "#0B5ED7",
+};
+
+// Set baseUrl and writeKey after deploying tracker/. Leave baseUrl empty while
+// testing locally; emails will then be sent without a tracking pixel.
+const TRACKING = {
+  baseUrl: "https://tracker-roan-xi.vercel.app",
+  writeKey: "5fe3df4eadef0b06664e4e090eb8850a3711ca7b8ff9b34e87467242e20ac9a7",
+};
+
+function createTrackingId() {
+  return crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function registerTracking({ trackingId, contact, segment, subject }) {
+  if (!TRACKING.baseUrl) return null;
+
+  const res = await fetch(`${TRACKING.baseUrl}/api/register`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Write-Key": TRACKING.writeKey,
+    },
+    body: JSON.stringify({
+      trackingId,
+      recipientEmail: contact.email,
+      company: contact.company || "",
+      segment,
+      subject,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Tracking registration failed (${res.status})`);
+  }
+  return trackingId;
+}
+
 const SEL = {
   composeButton: ['div[gh="cm"]', 'div[role="button"][gh="cm"]'],
   subject: ['input[name="subjectbox"]', 'input[aria-label="Subject"]'],
@@ -121,15 +165,47 @@ function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function setBody(el, text) {
+function setBody(el, html) {
   el.focus();
   document.execCommand("selectAll", false, null);
   document.execCommand("delete", false, null);
-  document.execCommand("insertText", false, text);
-  if (!el.textContent.trim()) {
-    el.innerHTML = text.split("\n").map(escapeHtml).join("<br>");
-    el.dispatchEvent(new InputEvent("input", { bubbles: true }));
-  }
+
+  el.innerHTML = html;
+  el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function createEmailHtml(body, trackingUrl = "") {
+    const bodyHtml = escapeHtml(body)
+      .replace(/\n\n+/g, "</p><p>")
+      .replace(/\n/g, "<br>");
+    const tracker = trackingUrl
+      ? `<img src="${escapeHtml(trackingUrl)}" width="1" height="1" style="display:none" alt="">`
+      : "";
+
+    return `
+      <p>${bodyHtml}</p>
+
+      <br>
+
+      <div style="border-top:1px solid #dddddd;padding-top:12px;
+                  font-family:Arial,sans-serif;font-size:12px;color:#666666">
+
+        <div style="display:inline-block;background:${BRAND.blue};
+                    padding:10px 14px;border-radius:6px;margin-bottom:8px">
+          <img src="${BRAND.logoUrl}"
+               alt="ZemenayTech"
+               width="140"
+               style="display:block;max-width:140px">
+        </div>
+
+        <div>
+          <strong>${escapeHtml(BRAND.name)}</strong><br>
+          ${escapeHtml(BRAND.website)}
+        </div>
+      </div>
+      ${tracker}
+    `;
 }
 
 // The panel lives in a shadow root, so document-level queries never see it.
@@ -300,7 +376,7 @@ async function setRecipient(dialog, email) {
   );
 }
 
-async function composeAndSend({ to, subject, body, autoSend }) {
+async function composeAndSend({ to, subject, body, autoSend, trackingUrl }) {
   const before = findComposeDialogs();
 
   const composeBtn = await waitFor(() => pick(document, SEL.composeButton), 15000);
@@ -322,7 +398,8 @@ async function composeAndSend({ to, subject, body, autoSend }) {
 
   setNativeValue(subjEl, subject);
   await sleep(150);
-  setBody(bodyEl, body);
+  const emailHtml = createEmailHtml(body, trackingUrl);
+  setBody(bodyEl, emailHtml);
   await sleep(300);
 
   if (!autoSend) {
@@ -571,7 +648,7 @@ function saveHistory() {
   return new Promise((r) => chrome.storage.local.set({ history }, r));
 }
 
-function recordSend(contact, segment, subject, { followUp = false } = {}) {
+function recordSend(contact, segment, subject, { followUp = false, trackingId = null } = {}) {
   const key = String(contact.email || "").trim().toLowerCase();
   if (!key) return;
   const now = Date.now();
@@ -582,7 +659,7 @@ function recordSend(contact, segment, subject, { followUp = false } = {}) {
   const from = detectAccount() || "";
 
   if (existing) {
-    existing.touches.push({ at: now, segment, subject, followUp, from });
+    existing.touches.push({ at: now, segment, subject, followUp, from, trackingId });
     existing.lastSentAt = now;
     if (from && !existing.account) existing.account = from;
     if (followUp) existing.followUps = (existing.followUps || 0) + 1;
@@ -599,7 +676,7 @@ function recordSend(contact, segment, subject, { followUp = false } = {}) {
       firstSentAt: now,
       lastSentAt: now,
       followUps: 0,
-      touches: [{ at: now, segment, subject, followUp: false, from }],
+      touches: [{ at: now, segment, subject, followUp: false, from, trackingId }],
       repliedAt: null,
       bouncedAt: null,
       bounceReason: "",
@@ -2015,12 +2092,21 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
     markRow(contact, "sending");
 
     let result;
+    let trackingId = null;
     try {
+      const subject = fillTemplate(tpl.subject, contact);
+      if (TRACKING.baseUrl) {
+        trackingId = createTrackingId();
+        await registerTracking({ trackingId, contact, segment: segId, subject });
+      }
       result = await composeAndSend({
         to: contact.email,
-        subject: fillTemplate(tpl.subject, contact),
+        subject,
         body: fillTemplate(tpl.body, contact),
         autoSend,
+        trackingUrl: trackingId
+          ? `${TRACKING.baseUrl}/api/open.gif?id=${encodeURIComponent(trackingId)}`
+          : "",
       });
     } catch (err) {
       result = { status: "error", message: err.message || String(err) };
@@ -2036,7 +2122,10 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
       markRow(contact, "done");
       // Record it only once Gmail confirmed, so a failure can be retried.
       await addSuppression([addr]);
-      recordSend(contact, segId, fillTemplate(tpl.subject, contact), { followUp: isFollowUpRun });
+      recordSend(contact, segId, fillTemplate(tpl.subject, contact), {
+        followUp: isFollowUpRun,
+        trackingId,
+      });
       await saveHistory();
       const label = (SEGMENTS.find((s) => s.id === segId) || {}).label || segId;
       addLog(`${result.status === "sent" ? "Sent to" : "Draft closed for"} ${contact.email} (${label})`, "ok");
