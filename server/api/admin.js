@@ -16,7 +16,7 @@ import {
 import {
   withLock, uploadContacts, queueView, removeFromQueue, clearQueue, ensurePlan, readPlan, invalidatePlans,
   listLog, getLogBody, addLog, health, followUpsDue, scanAccount, scanAll, tick, accountsOf, testBatchPlan, sendTestBatch, testFollowUpPlan, sendTestFollowUps,
-  laneAccounts, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, previewContact,
+  laneAccounts, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, senderOf, previewContact,
   CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES,
 } from './_engine.js';
 import { checkOne, importLists, counts as suppCounts, isRoleAddress } from './_suppress.js';
@@ -169,7 +169,7 @@ const actions = {
     const account = laneAccounts(config, settings, lane)[0] || null;
     const ro = renderOptsFor(settings, lane);
     const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates: templatesFor(config, settings), templateId,
-      senderName: account ? config.senders[account] || '' : '', token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
+      ...senderOf(config, account), token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
     return { ...r, lane, to: pick.row.email, account, source: pick.source, index: pick.index, of: pick.of };
   },
 
@@ -247,7 +247,7 @@ const actions = {
     const filled = (id) => Boolean(String(templates[id]?.subject || '').trim() && String(templates[id]?.body || '').trim());
     const segments = SEGMENTS.filter((s) => s.id !== 'followup').map((s) => ({ id: s.id, label: s.label,
       lanes: Object.fromEntries(LANES.map((l) => { const t = firstTemplateFor(settings, l, s.id); return [l, { template: t, ok: filled(t) }]; })) }));
-    const BUILTIN = new Set(['sender_name', 'unsubscribe', 'unsubscribe_url', 'business_type', 'pain', ...CONTACT_COLUMNS.map((c) => c.id)]);
+    const BUILTIN = new Set(['sender_name', 'nick_name', 'unsubscribe', 'unsubscribe_url', 'business_type', 'pain', ...CONTACT_COLUMNS.map((c) => c.id)]);
     const used = new Set();
     for (const t of Object.values(templates)) for (const m of `${t?.subject || ''}\n${t?.body || ''}`.matchAll(/\{\{(\w+)\}\}/g)) used.add(m[1].toLowerCase());
     for (const m of String(settings.footer || '').matchAll(/\{\{(\w+)\}\}/g)) used.add(m[1].toLowerCase());
@@ -298,7 +298,7 @@ const actions = {
     if (b.template) templates[templateId] = { subject: String(b.template.subject || ''), body: String(b.template.body || '') };
     const account = b.account && config.senders[b.account] !== undefined ? b.account : accountsOf(config)[0];
     const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates, templateId,
-      senderName: config.senders[account] || '', token: 'preview0000000', footer: b.footer !== undefined ? String(b.footer) : settings.footer });
+      ...senderOf(config, account), token: 'preview0000000', footer: b.footer !== undefined ? String(b.footer) : settings.footer });
     return { ...r, to: pick.row.email, account, source: pick.source, contactTemplate: pick.template, index: pick.index, of: pick.of };
   },
 
@@ -324,9 +324,9 @@ const actions = {
     if (b.templateId === 'lane') templateId = firstTemplateFor(settings, lane, pick.template || routeContact(pick.row || {}));
     if (b.templateId === 'lane-followup') templateId = followupTemplateFor(settings, lane);
     const token = newToken();
-    const senderName = config.senders[account] || '';
+    const { senderName, nickName } = senderOf(config, account);
     const ro = renderOptsFor(settings, lane);
-    const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates: templatesFor(config, settings), templateId, senderName, token,
+    const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates: templatesFor(config, settings), templateId, senderName, nickName, token,
       footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
     const mail = r.plain
       ? { from: fromHeader(senderName, account), to, subject: `[TEST] ${r.subject}`, text: r.text }
@@ -360,7 +360,8 @@ const actions = {
     const old = parse(list[Number(b.index)]);
     if (!old) throw bad('no such version');
     const prev = await readConfig();
-    const next = cleanConfig({ ...old, senders: b.keepSenders === false ? old.senders : prev.senders }, prev);
+    const keep = b.keepSenders !== false;
+    const next = cleanConfig({ ...old, senders: keep ? prev.senders : old.senders, nicknames: keep ? prev.nicknames : old.nicknames }, prev);
     await saveConfig(next, prev);
     return { config: next, restoredFrom: old.version || 0 };
   },

@@ -23,6 +23,8 @@ export const DEFAULT_CONFIG = {
     'berryydaniel@gmail.com': '',
     'noahadanial@gmail.com': '',
   },
+  // Optional per-account nickname for {{nick_name}}; empty means the name above.
+  nicknames: {},
 };
 
 const int = (v, lo, hi, d) => {
@@ -44,6 +46,13 @@ export function cleanConfig(input, prev = DEFAULT_CONFIG) {
     const e = String(email).trim().toLowerCase();
     if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(e)) senders[e] = str(name, 40).trim();
   }
+  // Only for accounts on the team list, and only non-empty ones are kept.
+  const nicknames = {};
+  for (const [email, nick] of Object.entries(input.nicknames || prev.nicknames || {})) {
+    const e = String(email).trim().toLowerCase();
+    const n = str(nick, 40).trim();
+    if (senders[e] !== undefined && n) nicknames[e] = n;
+  }
   return {
     version: (prev.version || 0) + 1,
     updatedAt: Date.now(),
@@ -52,6 +61,7 @@ export function cleanConfig(input, prev = DEFAULT_CONFIG) {
     maxTouches: int(input.maxTouches, 1, 5, prev.maxTouches),
     templates,
     senders,
+    nicknames,
   };
 }
 

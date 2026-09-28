@@ -663,7 +663,8 @@ loaders.templates = async () => {
   if (!ACCOUNTS.length) ACCOUNTS = Object.keys(cfg.senders);
   $('segTabs').innerHTML = TPL.map(([id, l]) => `<button data-seg="${id}" class="${id === seg ? 'on' : ''}"><i style="background:${segColor(id)}"></i>${l}</button>`).join('');
   $('senders').innerHTML = Object.entries(cfg.senders).map(([a, n]) =>
-    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="Name, e.g. Berry (empty: signs as The Zemenay team)" aria-label="Name for ${esc(a)}"></label>`).join('');
+    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="Name, e.g. Berry" aria-label="Name for ${esc(a)}"></label>` +
+    `<label class="f"><span>Nickname <code>{{nick_name}}</code></span><input data-nick="${esc(a)}" value="${esc((cfg.nicknames || {})[a] || '')}" placeholder="Optional, e.g. Mike" aria-label="Nickname for ${esc(a)}"></label>`).join('');
   $('cDaily').value = cfg.dailyLimit; $('cFuDays').value = cfg.followUpDays; $('cTouches').value = cfg.maxTouches;
   $('pvAccount').innerHTML = Object.keys(cfg.senders).map((a) => `<option>${esc(a)}</option>`).join('');
   $('tStatus').textContent = `live version v${cfg.version || 0}${cfg.updatedAt ? `, saved ${when(cfg.updatedAt)}` : ' (built-in defaults)'}`;
@@ -709,10 +710,11 @@ async function preview() {
 $('tSave').onclick = async () => {
   stash();
   const senders = {}; document.querySelectorAll('[data-sender]').forEach((i) => (senders[i.dataset.sender] = i.value.trim()));
+  const nicknames = {}; document.querySelectorAll('[data-nick]').forEach((i) => (nicknames[i.dataset.nick] = i.value.trim()));
   const emptyT = TPL.filter(([id]) => !cfg.templates[id].subject.trim() || !cfg.templates[id].body.trim()).map(([, l]) => l);
   if (emptyT.length && !confirm(`These templates are empty: ${emptyT.join(', ')}. Save anyway?`)) return;
   const res = await fetch('/api/config', { method: 'PUT', headers: { 'content-type': 'application/json', 'x-admin-password': PW },
-    body: JSON.stringify({ templates: cfg.templates, senders, dailyLimit: +$('cDaily').value, followUpDays: +$('cFuDays').value, maxTouches: +$('cTouches').value }) });
+    body: JSON.stringify({ templates: cfg.templates, senders, nicknames, dailyLimit: +$('cDaily').value, followUpDays: +$('cFuDays').value, maxTouches: +$('cTouches').value }) });
   const d = await res.json().catch(() => ({}));
   if (res.status === 401) return handleErr(new AuthError(d.error));
   if (!res.ok) return toast(d.error || 'save failed');

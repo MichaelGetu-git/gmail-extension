@@ -150,6 +150,14 @@ section('1. rendering is identical to the extension (content.js)');
   const fe = ext.fillTemplate(extTemplates.followup.body, w);
   const fs = R.renderEmail({ contact: { ...fuRow }, templates: DEFAULT_TEMPLATES, templateId: 'followup', senderName: '', token: 'abcabcabcabc' });
   check('follow-up body identical (unsigned -> "The Zemenay team")', fe === fs.bodyText && fs.bodyText.includes('The Zemenay team'));
+  // {{nick_name}}: the nickname when set, else the name it signs with
+  const nickTpl = { ...DEFAULT_TEMPLATES, tech: { subject: 'hi from {{nick_name}}', body: 'Hey, this is {{nick_name}}.\n\n{{sender_name}}' } };
+  const nr = { email: 'n@x.example', company: 'Nick Co', segment: 'tech', _segment: 'tech' };
+  const nickOf = (sender, nick) => ext.fillTemplate(nickTpl.tech.body, ext.withWording({ ...nr, sender_name: sender, nick_name: nick }));
+  const srvNick = (senderName, nickName) => R.renderEmail({ contact: { ...nr }, templates: nickTpl, templateId: 'tech', senderName, nickName, token: 'nicknick00000001' }).bodyText;
+  check('{{nick_name}} identical: the nickname, else the name, else "The Zemenay team"', nickOf('Michael @ ZemenayTech', 'Mike') === srvNick('Michael @ ZemenayTech', 'Mike')
+    && srvNick('Michael @ ZemenayTech', 'Mike') === 'Hey, this is Mike.\n\nMichael' && nickOf('Berry', '') === srvNick('Berry', '') && srvNick('Berry', '') === 'Hey, this is Berry.\n\nBerry'
+    && nickOf('', '') === srvNick('', '') && srvNick('', '').startsWith('Hey, this is The Zemenay team.'));
   const tok = R.newToken();
   check('tokens match the tracker format', /^[a-z0-9]{16}$/.test(tok) && tok !== R.newToken());
 }
@@ -1575,6 +1583,25 @@ await reset();
   const tm = sim.sent[n0];
   check('a name saved as "Berry @ ZemenayTech" sends from "Berry" and signs off "Berry"', ts.status === 200 && tm?.mail.from?.name === 'Berry'
     && /^From: Berry <berryydaniel@gmail\.com>$/m.test(tm?.raw || '') && tm?.mail.text.includes('\nBerry\nZemenay'), `${JSON.stringify(tm?.mail.from)} ${ts.raw}`);
+
+  // Nicknames: saved per account, served to the extension, and filled into {{nick_name}}.
+  const cfgNow = (await call(handlers.config, { headers: { 'x-team-key': 'team-test-key' } })).json;
+  const nickTemplates = { ...cfgNow.templates, callcenter: { subject: '{{company}}: a quick one', body: 'Hi {{company}} team,\n\nHey, this is {{nick_name}} from Zemenay.\n\n{{sender_name}}' } };
+  const pn = await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' },
+    body: { templates: nickTemplates, nicknames: { [ACCOUNTS[0].toUpperCase()]: '  Danny ', [ACCOUNTS[1]]: '', 'stranger@x.example': 'Nope' } } });
+  const gn = (await call(handlers.config, { headers: { 'x-team-key': 'team-test-key' } })).json;
+  check('nicknames are saved for known accounts only, trimmed, empty ones dropped, and served to the extension', pn.status === 200
+    && JSON.stringify(gn.nicknames) === JSON.stringify({ [ACCOUNTS[0]]: 'Danny' }) && gn.senders[ACCOUNTS[0]] === 'Daniel', JSON.stringify(gn.nicknames));
+  const keepNick = await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' }, body: { dailyLimit: 12 } });
+  check('a save without nicknames keeps them', keepNick.json.nicknames[ACCOUNTS[0]] === 'Danny');
+  const n1 = sim.sent.length;
+  await admin('test.send', { account: ACCOUNTS[0], to: 'michaelgetu21@gmail.com', templateId: 'callcenter' });
+  await admin('test.send', { account: ACCOUNTS[1], to: 'michaelgetu21@gmail.com', templateId: 'callcenter' });
+  const [withNick, noNick] = [sim.sent[n1], sim.sent[n1 + 1]];
+  check('{{nick_name}} is the nickname where one is set, else the account\'s name', /Hey, this is Danny from Zemenay\.\n\nDaniel/.test(withNick?.mail.text || '')
+    && withNick?.mail.from?.name === 'Daniel' && /Hey, this is Brook from Zemenay\.\n\nBrook/.test(noNick?.mail.text || ''), `${withNick?.mail.text?.slice(0, 120)} | ${noNick?.mail.text?.slice(0, 120)}`);
+  const pvn = (await admin('preview', { templateId: 'callcenter', account: ACCOUNTS[0] })).json;
+  check('the template preview fills {{nick_name}} with no placeholder warning', /Hey, this is Danny/.test(pvn.text) && pvn.problems.ok, JSON.stringify(pvn.problems));
 }
 
 // ============================================================ categories switched off (Virtual assistants by default)

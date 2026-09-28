@@ -29,6 +29,8 @@ const FINAL = new Set(['sent', 'failed', 'bounced', 'skipped']);
 const parse = (s, d = null) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
 export const accountsOf = (config) => Object.keys(config.senders || {});
+// The name and nickname an account's emails use (renderEmail's senderName / nickName).
+export const senderOf = (config, account) => ({ senderName: (config.senders || {})[account] || '', nickName: (config.nicknames || {})[account] || '' });
 // The From header: the account's name alone ("Berry"), even when it was saved
 // with the company ("Berry @ ZemenayTech"); just the address when no name is set.
 export function fromHeader(name, account) {
@@ -383,7 +385,7 @@ export async function previewContact(email) {
   const ro = renderOptsFor(settings, lane);
   const row = rowFor(settings, c.row || { email: e });
   const r = renderEmail({ contact: { ...row, _segment: templateId }, templates: templatesFor(config, settings), templateId,
-    senderName: (config.senders || {})[account] || '', token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
+    ...senderOf(config, account), token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
   return { email: e, name: c.row?.name || c.row?.first_name || '', company: c.row?.company || '', status: c.status || 'queued', lane,
     account, at, templateId, subject: r.subject, text: r.text, html: r.html || '', plain: Boolean(r.plain), personal: r.personal,
     ...personalLines(row), problems: r.problems };
@@ -804,10 +806,10 @@ export async function sendItem(item, { now = Date.now(), today = eatDate(now), b
   } else row = rec.row || { email, company: rec.company };
 
   const token = newToken();
-  const senderName = (config.senders || {})[item.account] || '';
+  const { senderName, nickName } = senderOf(config, item.account);
   const ro = renderOptsFor(settings, lane);
   const r = renderEmail({ contact: { ...rowFor(settings, row), _segment: item.template }, templates: templatesFor(config, settings),
-    templateId: item.template, senderName, token, footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
+    templateId: item.template, senderName, nickName, token, footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
   if (settings.blockOnPlaceholderIssues && !r.problems.ok) {
     const why = [...r.problems.missing.map((f) => `{{${f}}} missing`), ...r.problems.empty.map((f) => `{{${f}}} empty`),
       ...(r.problems.emptyTemplate ? ['template empty'] : [])].join(', ');

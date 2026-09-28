@@ -132,6 +132,8 @@ export function withWording(c) {
     business_type: String(c.business_type || '').trim() || d.business_type,
     pain: String(c.pain || '').trim() || d.pain,
     sender_name: signOffName(c.sender_name) || DEFAULT_SENDER,
+    // {{nick_name}}: the account's nickname, else the name it signs with.
+    nick_name: String(c.nick_name || '').trim() || signOffName(c.sender_name) || DEFAULT_SENDER,
   };
 }
 
@@ -200,11 +202,11 @@ export function personalFlags(row, templateId) {
   return subject || opener ? { subject, opener } : null;
 }
 
-export function renderEmail({ contact, templates, templateId, senderName, token, footer = DEFAULT_FOOTER, plain = false, optOut = '' }) {
+export function renderEmail({ contact, templates, templateId, senderName, nickName = '', token, footer = DEFAULT_FOOTER, plain = false, optOut = '' }) {
   const segId = templateId || contact._segment || routeContact(contact);
   const tpl = personalise(templates[segId] || { subject: '', body: '' }, contact, segId);
   const personal = personalFlags(contact, segId);
-  const worded = withWording({ ...contact, _segment: contact._segment || segId, sender_name: senderName || '' });
+  const worded = withWording({ ...contact, _segment: contact._segment || segId, sender_name: senderName || '', nick_name: nickName || '' });
   const subject = fillTemplate(tpl.subject, worded);
   const bodyText = fillTemplate(tpl.body, worded);
   if (plain) {

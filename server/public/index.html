@@ -144,11 +144,11 @@
               <div class="tplstats" id="tplStats"></div>
               <label class="f">Subject <input id="tSubject"></label>
               <label class="f" style="margin-top:12px">Body <textarea id="tBody" rows="17"></textarea></label>
-              <p class="cap" style="margin-top:8px">Placeholders: any CSV column as <code>{{column}}</code>, plus <code>{{sender_name}}</code>. <code>{{business_type}}</code> and <code>{{pain}}</code> fall back to the segment's default wording when the row has none. Saving updates every copy of the extension within 10 minutes, and the server's own sending.</p>
+              <p class="cap" style="margin-top:8px">Placeholders: any CSV column as <code>{{column}}</code>, plus <code>{{sender_name}}</code> and <code>{{nick_name}}</code> (the account's nickname, else its name). <code>{{business_type}}</code> and <code>{{pain}}</code> fall back to the segment's default wording when the row has none. Saving updates every copy of the extension within 10 minutes, and the server's own sending.</p>
               <div class="row"><button class="btn primary" id="tSave">Save all templates</button><span class="sub" id="tStatus"></span></div>
             </div>
             <div class="card">
-              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's name, for example "Berry". Server sends go out from that name and sign off with it (<code>{{sender_name}}</code>). Anything after " @ " or " at " (such as "@ ZemenayTech") is left out of both. These limits apply to the extension; server sending has its own under Sending.</p></div></div>
+              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's name, for example "Berry". Server sends go out from that name and sign off with it (<code>{{sender_name}}</code>). Anything after " @ " or " at " (such as "@ ZemenayTech") is left out of both. The optional nickname fills <code>{{nick_name}}</code> in a template ("Hey, this is {{nick_name}}"); an account without one uses its name there. These limits apply to the extension; server sending has its own under Sending.</p></div></div>
               <div class="form" id="senders" style="grid-template-columns:1fr 1fr"></div>
               <div class="form" style="margin-top:14px">
                 <label class="f">Extension daily limit <input type="number" id="cDaily" min="1" max="200"></label>
@@ -378,7 +378,7 @@
               <label class="f" style="margin-top:8px">First email body <textarea id="lCustBody" rows="7"></textarea></label>
               <label class="f" style="margin-top:8px">Follow-up subject <input id="lFuSub"></label>
               <label class="f" style="margin-top:8px">Follow-up body <textarea id="lFuBody" rows="5"></textarea></label>
-              <p class="cap" style="margin-top:6px">Placeholders work as on the Templates page (<code>{{first_name}}</code>, <code>{{company}}</code>, any CSV column, <code>{{sender_name}}</code>).</p>
+              <p class="cap" style="margin-top:6px">Placeholders work as on the Templates page (<code>{{first_name}}</code>, <code>{{company}}</code>, any CSV column, <code>{{sender_name}}</code>, <code>{{nick_name}}</code>).</p>
             </details>
             <div class="row" style="margin-top:14px"><button class="btn primary" id="lSave">Save lane options</button><button class="btn" id="lPvGo">Preview first email</button><button class="btn" id="lPvFu">Preview follow-up</button><span class="sub" id="lSaveStatus"></span></div>
             <div id="lPvBox" style="margin-top:12px"></div>

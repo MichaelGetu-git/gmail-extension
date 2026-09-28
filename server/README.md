@@ -280,6 +280,12 @@ company ("Berry @ ZemenayTech", "Berry at ZemenayTech") is cut to "Berry" in
 both places. An account with no name sends from its bare address and signs off
 "The Zemenay team".
 
+Next to each name is an optional **nickname**, used wherever a template says
+`{{nick_name}}` ("Hey, this is {{nick_name}} from Zemenay"). Set it only on the
+accounts that need one; an account without a nickname fills `{{nick_name}}`
+with its name. It is saved with the templates (`nicknames` in `/api/config`),
+so the extension fills `{{nick_name}}` the same way.
+
 ### Environment variables (Vercel → Settings → Environment Variables)
 
 | Name | What |

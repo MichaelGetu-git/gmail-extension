@@ -161,6 +161,12 @@ function senderName() {
   return (remote.senders || {})[String(detectAccount() || "").toLowerCase()] || DEFAULT_SENDER;
 }
 
+// This account's nickname from the dashboard, for {{nick_name}} ("Hey, this is
+// Mike"). Empty: {{nick_name}} is the name the email signs with.
+function nickName() {
+  return (remote.nicknames || {})[String(detectAccount() || "").toLowerCase()] || "";
+}
+
 // Emails this account has sent today (local day), counted from the history —
 // the daily limit applies to first emails and follow-ups together.
 function sentToday(account = detectAccount()) {
@@ -743,6 +749,8 @@ function withWording(c) {
     business_type: String(c.business_type || "").trim() || d.business_type,
     pain: String(c.pain || "").trim() || d.pain,
     sender_name: signOffName(c.sender_name) || DEFAULT_SENDER,
+    // {{nick_name}}: the account's nickname, else the name it signs with.
+    nick_name: String(c.nick_name || "").trim() || signOffName(c.sender_name) || DEFAULT_SENDER,
   };
 }
 
@@ -1889,7 +1897,7 @@ function renderPreview() {
   }
 
   previewIndex = Math.max(0, Math.min(previewIndex, list.length - 1));
-  const c = withWording({ ...list[previewIndex], sender_name: senderName() });
+  const c = withWording({ ...list[previewIndex], sender_name: senderName(), nick_name: nickName() });
   const segId = c._segment || routeContact(c);
   const seg = SEGMENTS.find((s) => s.id === segId);
   // Read the live editor for the segment on screen, so typing shows up here
@@ -2391,7 +2399,7 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
       break;
     }
     const token = newToken();
-    const worded = withWording({ ...contact, sender_name: senderName() });
+    const worded = withWording({ ...contact, sender_name: senderName(), nick_name: nickName() });
     const bodyText = fillTemplate(tpl.body, worded);
     ui.status.textContent = `${sent + failed} / ${total} · ${sent} ok, ${failed} failed`;
     markRow(contact, "sending");
