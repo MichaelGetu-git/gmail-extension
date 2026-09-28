@@ -148,7 +148,7 @@
               <div class="row"><button class="btn primary" id="tSave">Save all templates</button><span class="sub" id="tStatus"></span></div>
             </div>
             <div class="card">
-              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's From name for server sends, for example "Michael at ZemenayTech". Emails sign off (<code>{{sender_name}}</code>) with just the name before " at " ("Michael"). These limits apply to the extension; server sending has its own under Sending.</p></div></div>
+              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's name, for example "Berry". Server sends go out from that name and sign off with it (<code>{{sender_name}}</code>). Anything after " @ " or " at " (such as "@ ZemenayTech") is left out of both. These limits apply to the extension; server sending has its own under Sending.</p></div></div>
               <div class="form" id="senders" style="grid-template-columns:1fr 1fr"></div>
               <div class="form" style="margin-top:14px">
                 <label class="f">Extension daily limit <input type="number" id="cDaily" min="1" max="200"></label>
@@ -207,11 +207,13 @@
             <label class="f">Reply check freshness (hours) <input id="sFresh" type="number" min="1" max="168"></label>
           </div>
           <div style="margin-top:16px"><div class="sub" style="margin-bottom:6px;font-weight:550;color:var(--text-2)">Sending days</div><div class="days" id="sDays"></div></div>
+          <div style="margin-top:16px"><div class="sub" style="margin-bottom:6px;font-weight:550;color:var(--text-2)">Categories that get emails (unticked: they wait in the queue, no follow-ups)</div><div class="days" id="sCats"></div></div>
           <div class="checks" style="margin-top:16px">
             <label class="chk"><input type="checkbox" id="sFu"> Send follow-ups</label>
             <label class="chk"><input type="checkbox" id="sRole"> Skip role addresses (info@, office@…)</label>
             <label class="chk"><input type="checkbox" id="sFree"> Domain list ignores gmail.com etc.</label>
             <label class="chk"><input type="checkbox" id="sBlock"> Hold emails with missing or empty placeholders</label>
+            <label class="chk"><input type="checkbox" id="sPers"> Use the CSV's own subject and opening lines (off: every first email is the template for its category)</label>
             <label class="chk"><input type="checkbox" id="sLU"> List-Unsubscribe header</label>
             <label class="chk"><input type="checkbox" id="sDry"> Dry-run (render and log, never send)</label>
             <label class="chk"><input type="checkbox" id="sRegPlain"> Regular lane: Plain text (no footer, no tracking)</label>

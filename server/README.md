@@ -152,10 +152,27 @@ share Test send's limit of 10 test emails per account per day.
 Both are also admin API actions: without `confirm` they only preview; with
 `confirm: [emails]` they send to those (allowlisted) addresses.
 
+### Categories switched off
+
+*Sending → Categories that get emails* picks which categories (first-email
+templates) are sent. **Virtual assistants is unticked by default** (setting
+`skipTemplates: ["va"]`). A contact whose first email would use an unticked
+category waits at the front of the queue (the *Queue* tab marks it "not sent:
+switched off"), and a contact already emailed with one gets no follow-up. The
+test batch leaves them out with the reason, and an email planned before the
+switch went off is held back at send time. Ticking the category again sends
+them from the next plan on.
+
 ### Personal subject and opening lines
 
-A contact row may carry two optional columns (any other column works as a
-`{{placeholder}}` as before):
+**Off by default.** Unless *Use the CSV's own subject and opening lines* is
+ticked on the *Sending* tab (setting `personalLines`), both columns are ignored
+everywhere (sends, test sends, previews, the queue and the plan) and every first
+email is the dashboard template for the contact's category. The columns stay
+stored on the contact, so ticking the switch brings them back.
+
+With the switch on, a contact row may carry two optional columns (any other
+column works as a `{{placeholder}}` as before):
 
 - `subject_line` replaces the template's subject on that contact's **first**
   email. Follow-ups keep the follow-up template's own subject.
@@ -253,6 +270,15 @@ extension's own open records and reports, and any key it doesn't recognise.
 Before deleting it writes everything it removes to
 `mailer:backup:reset:<timestamp>` (kept 180 days), reads it back, and returns
 it in the response.
+
+### Sender names
+
+Each account's name is set on the *Templates* tab (*Signatures and extension
+limits*), for example "Berry". Server sends go out as
+`Berry <berryydaniel@gmail.com>` and sign off "Berry". A name saved with the
+company ("Berry @ ZemenayTech", "Berry at ZemenayTech") is cut to "Berry" in
+both places. An account with no name sends from its bare address and signs off
+"The Zemenay team".
 
 ### Environment variables (Vercel → Settings → Environment Variables)
 

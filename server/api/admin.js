@@ -16,7 +16,7 @@ import {
 import {
   withLock, uploadContacts, queueView, removeFromQueue, clearQueue, ensurePlan, readPlan, invalidatePlans,
   listLog, getLogBody, addLog, health, followUpsDue, scanAccount, scanAll, tick, accountsOf, testBatchPlan, sendTestBatch, testFollowUpPlan, sendTestFollowUps,
-  laneAccounts, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, previewContact,
+  laneAccounts, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, previewContact,
   CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES,
 } from './_engine.js';
 import { checkOne, importLists, counts as suppCounts, isRoleAddress } from './_suppress.js';
@@ -168,7 +168,7 @@ const actions = {
       : firstTemplateFor(settings, lane, pick.template || routeContact(pick.row || {}));
     const account = laneAccounts(config, settings, lane)[0] || null;
     const ro = renderOptsFor(settings, lane);
-    const r = renderEmail({ contact: { ...pick.row, _segment: templateId }, templates: templatesFor(config, settings), templateId,
+    const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates: templatesFor(config, settings), templateId,
       senderName: account ? config.senders[account] || '' : '', token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
     return { ...r, lane, to: pick.row.email, account, source: pick.source, index: pick.index, of: pick.of };
   },
@@ -203,7 +203,7 @@ const actions = {
     const firsts = plan.items.filter((i) => !i.followUp);
     if (firsts.length) {
       const recs = (await command('HMGET', K.contacts, ...firsts.map((i) => i.email))) || [];
-      firsts.forEach((it, j) => Object.assign(it, personalLines(parse(recs[j], {}).row)));
+      firsts.forEach((it, j) => Object.assign(it, personalLines(rowFor(settings, parse(recs[j], {}).row))));
     }
     return { plan, today };
   },
@@ -297,7 +297,7 @@ const actions = {
     const templates = { ...config.templates };
     if (b.template) templates[templateId] = { subject: String(b.template.subject || ''), body: String(b.template.body || '') };
     const account = b.account && config.senders[b.account] !== undefined ? b.account : accountsOf(config)[0];
-    const r = renderEmail({ contact: { ...pick.row, _segment: templateId }, templates, templateId,
+    const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates, templateId,
       senderName: config.senders[account] || '', token: 'preview0000000', footer: b.footer !== undefined ? String(b.footer) : settings.footer });
     return { ...r, to: pick.row.email, account, source: pick.source, contactTemplate: pick.template, index: pick.index, of: pick.of };
   },
@@ -326,12 +326,12 @@ const actions = {
     const token = newToken();
     const senderName = config.senders[account] || '';
     const ro = renderOptsFor(settings, lane);
-    const r = renderEmail({ contact: { ...pick.row, _segment: templateId }, templates: templatesFor(config, settings), templateId, senderName, token,
+    const r = renderEmail({ contact: { ...rowFor(settings, pick.row), _segment: templateId }, templates: templatesFor(config, settings), templateId, senderName, token,
       footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
     const mail = r.plain
-      ? { from: senderName ? { name: senderName, address: account } : account, to, subject: `[TEST] ${r.subject}`, text: r.text }
+      ? { from: fromHeader(senderName, account), to, subject: `[TEST] ${r.subject}`, text: r.text }
       : {
-        from: senderName ? { name: senderName, address: account } : account, to,
+        from: fromHeader(senderName, account), to,
         subject: `[TEST] ${r.subject}`, text: r.text, html: r.html,
         headers: settings.listUnsubscribe ? { 'List-Unsubscribe': `<${r.unsubscribeUrl}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : {},
       };
