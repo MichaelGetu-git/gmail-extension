@@ -1650,6 +1650,67 @@ section('Categories switched off: Virtual assistants gets no emails by default; 
   await saveSettings({ paused: true });
 }
 
+// ============================================================ any times: an overnight run
+section('Any times: an overnight run (17:00 -> 06:00) starts today, sends past midnight, and is one sending day');
+await reset();
+{
+  E.setRandom(mulberry(101));
+  const saved = await saveSettings({ windowStart: '17:00', windowEnd: '17:00', lateCutoff: '06:00', perAccountCap: 10, minGapMin: 60, maxGapMin: 90 });
+  check('the times save as entered (no clamping)', saved.windowStart === '17:00' && saved.windowEnd === '17:00' && saved.lateCutoff === '06:00', JSON.stringify(saved));
+  const free = S.cleanSettings({ windowStart: '22:30', windowEnd: '02:00', lateCutoff: '04:00' });
+  check('any time of day is accepted; an end or cutoff before the start is the next morning', free.windowStart === '22:30' && free.windowEnd === '02:00' && free.lateCutoff === '04:00'
+    && JSON.stringify(S.dayWindow(free)) === JSON.stringify({ start: 1350, end: 1560, cutoff: 1680 }), JSON.stringify(S.dayWindow(free)));
+  check('the latest start is pulled back to the cutoff', S.cleanSettings({ windowStart: '17:00', windowEnd: '23:00', lateCutoff: '18:00' }).windowEnd === '18:00');
+  const MON = '2026-11-30', TUE = '2026-12-01';
+  check('sendingDay: Mon 16:00 and Tue 02:00 belong to Monday\'s run, Tue 07:00 to Tuesday\'s',
+    S.sendingDay(EAT(MON, '16:00'), saved) === MON && S.sendingDay(EAT(TUE, '02:00'), saved) === MON && S.sendingDay(EAT(TUE, '07:00'), saved) === TUE);
+  const rs = (t) => E.runStatus(t, saved);
+  check('runStatus: before 17:00, open overnight, and after 06:00 the next run is that evening',
+    rs(EAT(MON, '16:00')).state === 'before' && rs(EAT(MON, '16:00')).closesAt === EAT(TUE, '06:00') && rs(EAT(TUE, '02:00')).state === 'open'
+    && rs(EAT(TUE, '02:00')).day === MON && rs(EAT(TUE, '02:00')).overnight && rs(EAT(TUE, '06:30')).day === TUE && rs(EAT(TUE, '06:30')).opensAt === EAT(TUE, '17:00'));
+  check('runStatus: a weekend day is off, and names Monday as the next run', rs(EAT('2026-12-05', '12:00')).state === 'offDay' && rs(EAT('2026-12-05', '12:00')).next.day === '2026-12-07');
+
+  await admin('contacts.upload', { csv: makeCsv(30, { prefix: 'on', verticals: ['dental'] }) });
+  await saveSettings({ paused: false });
+  // 17:04, the window end (17:00) already passed: the next-day view still plans today first, from now.
+  const tue = await E.ensurePlan(TUE, { now: EAT(MON, '17:04') });
+  const mon = await E.readPlan(MON);
+  check('planning the next day at 17:04 plans today first and starts from now', mon.meta && mon.items.length === 30 && tue.items.length === 0
+    && mon.items.every((i) => i.at >= EAT(MON, '17:05')) && Math.min(...mon.items.map((i) => i.at)) === EAT(MON, '17:05'), `${mon.items.length} ${tue.items.length}`);
+  for (let t = EAT(MON, '17:04'); t <= EAT(TUE, '07:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const at = sim.sent.map((m) => m.at);
+  check('all 30 go out: the first at 17:05, some after midnight, none at or after 06:00', sim.sent.length === 30 && Math.min(...at) === EAT(MON, '17:05')
+    && at.some((x) => x >= EAT(TUE, '00:00')) && at.every((x) => x < EAT(TUE, '06:00')), `${sim.sent.length} ${new Date(Math.max(...at)).toISOString()}`);
+  const monCount = ((await command('HVALS', S.K.count(MON))) || []).reduce((n, v) => n + Number(v), 0);
+  check('every send counts on Monday\'s run (its cap and its plan), none on Tuesday\'s', monCount === 30 && !(await command('EXISTS', S.K.count(TUE)))
+    && (await E.readPlan(MON)).items.every((i) => i.status === 'sent'), `${monCount}`);
+
+  // A later day's plan built before today's gives its contacts back to today's.
+  const WED = '2026-12-02', THU = '2026-12-03';
+  await admin('contacts.upload', { csv: makeCsv(5, { prefix: 'fifo', verticals: ['dental'] }) });
+  await E.buildPlan(THU, EAT(WED, '10:00'), await S.readSettings());
+  check('(setup) Thursday\'s plan took the 5 new contacts', (await E.readPlan(THU)).items.length === 5);
+  const wed = await E.ensurePlan(WED, { now: EAT(WED, '10:00') });
+  check('building today\'s plan takes them back from the later plan', wed.items.length === 5 && !(await E.readPlan(THU)).meta, `${wed.items.length}`);
+
+  // Friday night into Saturday: Friday's run, while Saturday is not a sending day.
+  const FRI = '2026-12-04', SAT = '2026-12-05';
+  await saveSettings({ windowStart: '23:50', windowEnd: '23:50', lateCutoff: '06:00', perAccountCap: 2, minGapMin: 30, maxGapMin: 30 });
+  await admin('contacts.upload', { csv: makeCsv(8, { prefix: 'fri', verticals: ['dental'] }) });
+  const n0 = sim.sent.length;
+  let satNote = null;
+  for (let t = EAT(FRI, '23:45'); t <= EAT(SAT, '01:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const fri = sim.sent.slice(n0);   // the 5 left from Wednesday's unsent plan go first, then 3 of these
+  const friCount = ((await command('HVALS', S.K.count(FRI))) || []).reduce((n, v) => n + Number(v), 0);
+  check('a Friday 23:50 run sends into Saturday morning, counted as Friday', fri.length === 8 && fri.filter((m) => m.at >= EAT(SAT, '00:00')).length === 4 && friCount === 8
+    && fri.filter((m) => /fifo/.test(m.to)).length === 5,
+    `${fri.length} ${friCount}`);
+  console.log('DEBUG', JSON.stringify((await E.readPlan(FRI)).items.map((i) => [i.email.slice(0, 12), i.status, i.reason, new Date(i.at).toISOString().slice(11, 19)])));
+  satNote = (await E.tick({ now: EAT(SAT, '07:00'), scan: false })).notes;
+  check('after the cutoff, Saturday itself is not a sending day', satNote.includes('not a sending day'), JSON.stringify(satNote));
+  await saveSettings({ paused: true });
+}
+
 // ============================================================ footer link wording
 section('Footer: the link says "Don\'t send this again"; an old saved default upgrades, a custom footer is kept');
 await reset();

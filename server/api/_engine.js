@@ -13,7 +13,7 @@
 import { command, pipeline } from './_store.js';
 import {
   K, readSettings, readAccountStates, patchAccountState, hasPassword, passwordVar,
-  DAY, eatDate, eatWeekday, eatAt, eatClock, toMin, addDays, nextWeekday,
+  DAY, eatDate, eatWeekday, eatAt, eatClock, toMin, addDays, nextWeekday, dayWindow, sendingDay,
   LANES, LANE_LABEL, laneOf, laneOpts, laneCap, contactLane, normLane,
 } from './_settings.js';
 import { readConfig } from './config.js';
@@ -461,8 +461,8 @@ async function releaseStale(today) {
 
 // Future plans (and today's, if nothing has been attempted) are provisional:
 // changed settings, pauses or new contacts rebuild them.
-export async function invalidatePlans(now, { includeUntouchedToday = true } = {}) {
-  const today = eatDate(now);
+export async function invalidatePlans(now, { includeUntouchedToday = true, settings = null } = {}) {
+  const today = sendingDay(now, settings || await readSettings());
   const dates = (await command('SMEMBERS', K.plans)) || [];
   let n = 0;
   for (const d of dates.filter((d) => d >= today)) {
@@ -479,14 +479,15 @@ export async function invalidatePlans(now, { includeUntouchedToday = true } = {}
 }
 
 export async function ensurePlan(date, { now = Date.now() } = {}) {
-  const today = eatDate(now);
+  const settings = await readSettings();
+  const today = sendingDay(now, settings);
   if (Number(await command('HEXISTS', K.plan(date), 'meta'))) {
     // A plan previewed on an earlier day stays as shown, unless contacts that
     // an earlier day failed to send have just come back to the front of the
     // queue; then an untouched plan is rebuilt so they go first.
     if (date !== today) return readPlan(date);
     const plan = await readPlan(date);
-    if (!plan.meta || eatDate(plan.meta.builtAt) >= today || plan.items.some((it) => it.status !== 'planned')) return plan;
+    if (!plan.meta || sendingDay(plan.meta.builtAt, settings) >= today || plan.items.some((it) => it.status !== 'planned')) return plan;
     let returning = 0;
     for (const d of ((await command('SMEMBERS', K.plans)) || []).filter((d) => d < today)) {
       const old = await readPlan(d);
@@ -500,13 +501,19 @@ export async function ensurePlan(date, { now = Date.now() } = {}) {
     await command('SREM', K.plans, date);
   }
   await releaseStale(today);
-  const settings = await readSettings();
-  // First in, first out: today's plan takes its contacts before tomorrow's
-  // (only while today's window is still open; after that the tick builds it).
+  // First in, first out: today's plan takes its contacts before any later
+  // day's, for as long as today's run has not ended (its cutoff), the same
+  // rule the tick follows. A later day's plan built before today's gives its
+  // contacts back first.
+  const buildToday = async () => {
+    await invalidatePlans(now, { includeUntouchedToday: false, settings });
+    return buildPlan(today, now, settings);
+  };
+  if (date === today) return buildToday();
   if (date > today && settings.weekdays.includes(eatWeekday(today)) &&
-      now < eatAt(today, toMin(settings.windowEnd)) &&
+      now < eatAt(today, dayWindow(settings).cutoff) &&
       !Number(await command('HEXISTS', K.plan(today), 'meta'))) {
-    await buildPlan(today, now, settings);
+    await buildToday();
   }
   return buildPlan(date, now, settings);
 }
@@ -516,7 +523,8 @@ export async function buildPlan(date, now, settings) {
   const config = await readConfig();
   const states = await readAccountStates();
   const cap = settings.perAccountCap;
-  const meta = { date, builtAt: now, cap, accounts: {}, offDay: false, window: [settings.windowStart, settings.windowEnd], lanes: {} };
+  const win = dayWindow(settings);
+  const meta = { date, builtAt: now, cap, accounts: {}, offDay: false, window: [settings.windowStart, settings.windowEnd, settings.lateCutoff], lanes: {} };
   const key = K.plan(date);
   const accounts = accountsOf(config);
   const active = accounts.filter((a) => !states[a]?.paused);
@@ -541,7 +549,7 @@ export async function buildPlan(date, now, settings) {
   // from the same account (and so the same lane) as their first email.
   const byAcct = Object.fromEntries(active.map((a) => [a, []]));
   if (settings.followUps) {
-    const cutoff = eatAt(date, 24 * 60) - config.followUpDays * DAY;
+    const cutoff = eatAt(date, Math.max(24 * 60, win.cutoff)) - config.followUpDays * DAY;
     const emails = (await command('ZRANGEBYSCORE', K.fu, '-inf', cutoff, 'LIMIT', 0, 1000)) || [];
     if (emails.length) {
       const reasons = await checkMany(emails, { settings, firstTouch: false });
@@ -603,13 +611,15 @@ export async function buildPlan(date, now, settings) {
     allPicked.push(...picked);
   }
 
-  // Random start per account inside the window, then random gaps.
-  const ws = toMin(settings.windowStart), we = toMin(settings.windowEnd);
+  // Random start per account inside the window, then random gaps. A run
+  // planned after its window opened starts from now (a minute from now).
+  const lo = Math.max(eatAt(date, win.start), now + 60000);
+  const hi = Math.max(eatAt(date, win.end), lo);
   const items = [];
   for (const a of active) {
     const list = byAcct[a];
     if (!list.length) continue;
-    let at = eatAt(date, ws) + Math.floor(rand() * ((we - ws) * 60 + 1)) * 1000;
+    let at = lo + Math.floor(rand() * ((hi - lo) / 1000 + 1)) * 1000;
     meta.accounts[a].start = at;
     list.forEach((it, i) => {
       if (i > 0) at += Math.round((settings.minGapMin + rand() * (settings.maxGapMin - settings.minGapMin)) * 60) * 1000;
@@ -635,7 +645,7 @@ export async function buildPlan(date, now, settings) {
 // If the trigger was down or sending was paused, the remaining sends are
 // re-timed from now with fresh random gaps rather than fired back to back.
 async function reflow(date, account, planned, now, settings) {
-  const cutoff = eatAt(date, toMin(settings.lateCutoff));
+  const cutoff = eatAt(date, dayWindow(settings).cutoff);
   let at = now + Math.round((1 + rand() * 2) * 60) * 1000;
   const out = [];
   planned.forEach((it, i) => {
@@ -745,8 +755,9 @@ async function failureStreak(account, now, n) {
   }
 }
 
-export async function sendItem(item, { now = Date.now(), today = eatDate(now), bypassPause = false, skipWait = false } = {}) {
+export async function sendItem(item, { now = Date.now(), today: todayArg = null, bypassPause = false, skipWait = false } = {}) {
   const settings = await readSettings();
+  const today = todayArg || sendingDay(now, settings);
   // Only the test batch may pass bypassPause, and only for allowlisted addresses.
   const allowlisted = bypassPause && (settings.testRecipients || []).includes(normEmail(item.email));
   if (bypassPause && !allowlisted) return { status: 'not on the test-recipient list' };
@@ -787,7 +798,7 @@ export async function sendItem(item, { now = Date.now(), today = eatDate(now), b
     else if (rec.touches.length !== item.touch - 1) reason = 'this touch was already sent';
     else if (rec.touches.length >= config.maxTouches) reason = 'reached max touches';
     // The test follow-up button skips the wait, for allowlisted addresses only.
-    else if (!(skipWait && allowlisted) && eatDate(rec.lastSentAt + config.followUpDays * DAY) > today) {
+    else if (!(skipWait && allowlisted) && sendingDay(rec.lastSentAt + config.followUpDays * DAY, settings) > today) {
       await saveItem({ ...item, status: 'deferred', reason: 'not due yet' });
       return { status: 'deferred', reason: 'not due yet' };
     } else if (!(st.lastImapOkAt >= now - settings.replyCheckHours * 3600000)) {
@@ -949,7 +960,7 @@ export async function testBatchPlan({ now = Date.now(), lane = 'regular' } = {})
   lane = normLane(lane);
   const settings = await readSettings();
   const config = await readConfig();
-  const today = eatDate(now);
+  const today = sendingDay(now, settings);
   const allow = settings.testRecipients || [];
   const allowSet = new Set(allow);
   const queued = (await command('LRANGE', K.queueOf(lane), 0, -1)) || [];
@@ -985,7 +996,7 @@ export async function testBatchPlan({ now = Date.now(), lane = 'regular' } = {})
 
 export async function sendTestBatch({ now = Date.now(), only = null, lane = 'regular' } = {}) {
   lane = normLane(lane);
-  const today = eatDate(now);
+  const today = sendingDay(now, await readSettings());
   const queueKey = K.queueOf(lane);
   // Hand untouched plans back to the queue (as a settings change would), so a
   // test contact already planned for the next sending day is found.
@@ -1036,7 +1047,7 @@ export async function testFollowUpPlan({ now = Date.now(), lane = 'regular' } = 
   lane = normLane(lane);
   const settings = await readSettings();
   const config = await readConfig();
-  const today = eatDate(now);
+  const today = sendingDay(now, settings);
   const allow = settings.testRecipients || [];
   const recs = allow.length ? ((await command('HMGET', K.sent, ...allow)) || []).map((r) => parse(r)) : [];
   // Only contacts whose first email went out in this lane.
@@ -1081,7 +1092,7 @@ export async function testFollowUpPlan({ now = Date.now(), lane = 'regular' } = 
 
 export async function sendTestFollowUps({ now = Date.now(), only = null, lane = 'regular' } = {}) {
   lane = normLane(lane);
-  const today = eatDate(now);
+  const today = sendingDay(now, await readSettings());
   const notes = [];
   try { const u = await syncUnsubscribes(); if (u) notes.push(`${u} new unsubscribe(s) recorded`); }
   catch (e) { notes.push(`unsubscribe sync failed: ${e.message}`); }
@@ -1140,10 +1151,10 @@ export async function tick({ now = Date.now(), budgetMs = 40000, scan = true } =
     catch (e) { out.notes.push(`unsubscribe sync failed: ${e.message}`); }
     const settings = await readSettings();
     const config = await readConfig();
-    const today = eatDate(now);
+    const today = sendingDay(now, settings);
     if (settings.paused) out.paused = true;
     else if (!settings.weekdays.includes(eatWeekday(today))) out.notes.push('not a sending day');
-    else if (now >= eatAt(today, toMin(settings.lateCutoff))) out.notes.push('past the day\'s cutoff');
+    else if (now >= eatAt(today, dayWindow(settings).cutoff)) out.notes.push('past the day\'s cutoff');
     else {
       const plan = await ensurePlan(today, { now });
       let states = await readAccountStates();
@@ -1286,13 +1297,28 @@ export async function scanAll(now = Date.now()) {
     bounces: results.reduce((n, r) => n + (r.bounces || 0), 0), failed: results.filter((r) => r.error).length };
 }
 
+// ------------------------------------------------------------------ today's run
+//
+// Where the current sending day stands, for the dashboard: its date, when it
+// opens, its latest start and its cutoff, and the next run after it.
+// state: 'before' (opens later), 'open', 'closed' (cutoff passed) or 'offDay'.
+export function runStatus(now, settings) {
+  const w = dayWindow(settings);
+  const day = sendingDay(now, settings);
+  const at = (d) => ({ opensAt: eatAt(d, w.start), lastStartAt: eatAt(d, w.end), closesAt: eatAt(d, w.cutoff) });
+  const t = at(day);
+  const state = !settings.weekdays.includes(eatWeekday(day)) ? 'offDay' : now < t.opensAt ? 'before' : now < t.closesAt ? 'open' : 'closed';
+  const nextDay = state === 'before' || state === 'open' ? day : nextWeekday(day, settings.weekdays);
+  return { day, state, paused: Boolean(settings.paused), ...t, overnight: w.cutoff > 24 * 60, next: { day: nextDay, ...at(nextDay) } };
+}
+
 // ------------------------------------------------------------------ health
 
 export async function health(now = Date.now()) {
   const config = await readConfig();
   const settings = await readSettings();
   const states = await readAccountStates();
-  const today = eatDate(now);
+  const today = sendingDay(now, settings);
   const dayStart = eatAt(today, 0);
   const counts = (await command('HGETALL', K.count(today))) || [];
   const attempts = {};

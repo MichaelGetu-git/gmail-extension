@@ -66,13 +66,18 @@ the server also needs the env vars below and a trigger.
    applied to gmail.com-style consumer domains (exact addresses still are);
    both of those are switches on the *Sending* tab.
 3. **Each sending day** (Mon–Fri by default) every unpaused account gets its
-   own random start between **09:00 and 11:30 EAT**, then sends its quota with
-   **random 3–8 minute gaps**. Default 15 per account per day, max 40.
+   own random start between **Window start and Window end** (default 09:00 and
+   11:30 EAT), then sends its quota with **random 3–8 minute gaps**. Any times
+   work: a *Window end* or *No sends after* earlier than the start is the next
+   morning, so 17:00 / 17:00 / 06:00 sends from Monday 17:00 until Tuesday
+   06:00, all of it Monday's run (Monday's plan, cap and weekday). If today's
+   run hasn't reached its cutoff, today is planned first (starting from now if
+   the window has already opened), never pushed to tomorrow. Default 15 per account per day, max 40.
    Follow-ups (same account as the first email, `followup` template, after
    `followUpDays`, up to `maxTouches`) come first and count toward the cap.
    The plan is stored in Redis, so the *Queue* tab's next-day view is what will
-   actually go out. Nothing is sent after 18:00 EAT; anything left goes back
-   to the front of the queue for the next day.
+   actually go out. Nothing is sent after *No sends after* (default 18:00
+   EAT); anything left goes back to the front of the queue for the next day.
 4. **Follow-ups only go out if that account's inbox was checked for replies in
    the last 24 hours.** Every tick reads each account's mail over IMAP (same
    app password, read-only) when it hasn't been checked for 10 minutes, for
@@ -317,8 +322,9 @@ trigger is external. Pick one (both is fine: ticks are idempotent):
 **Option A — cron-job.org (free, simplest).** Sign up at cron-job.org → *Create
 cronjob*:
 - URL `https://mailer-tracker.vercel.app/api/tick`
-- Schedule: every minute; *Custom*: days Mon–Fri, hours 9–17, timezone
-  `Africa/Nairobi`
+- Schedule: every minute, **all hours, every day** (timezone
+  `Africa/Nairobi`). Ticks outside the sending window send nothing, but an
+  evening or overnight window needs ticks then, and replies are checked all day.
 - *Advanced* → Headers: `Authorization` = `Bearer <your CRON_SECRET>`;
   request method GET; timeout 30 s. Save, then *Test run*: the response should
   be `{"ok":true,...}` (with `"paused":true` until you unpause).
@@ -329,14 +335,15 @@ messages/day). Copy the QStash token, then:
 ```bash
 curl -X POST "https://qstash.upstash.io/v2/schedules/https://mailer-tracker.vercel.app/api/tick" \
   -H "Authorization: Bearer <QSTASH_TOKEN>" \
-  -H "Upstash-Cron: * 6-14 * * 1-5" \
+  -H "Upstash-Cron: * * * * *" \
   -H "Upstash-Method: POST" \
   -H "Upstash-Retries: 0" \
   -H "Upstash-Forward-Authorization: Bearer <your CRON_SECRET>"
 ```
 
-(QStash cron is UTC: `6-14` is 09:00–17:59 EAT; 540 calls a day. Use the
-QStash URL your console shows if it isn't `qstash.upstash.io`.)
+(Every minute, all day: 1,440 calls a day, over QStash's free 1,000, so
+cron-job.org is the better fit. Use the QStash URL your console shows if it
+isn't `qstash.upstash.io`.)
 
 Once a trigger runs, the *Sending* tab shows "Last tick". Then: upload
 contacts, check the *Queue* tab's next-day plan, send yourself a test from

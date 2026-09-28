@@ -10,13 +10,13 @@ import { body, isAdmin, send, teamCors } from './_auth.js';
 import { readConfig, cleanConfig, saveConfig, HISTORY_KEY } from './config.js';
 import {
   K, readSettings, writeSettings, cleanSettings, readAccountStates, patchAccountState,
-  hasPassword, passwordVar, eatDate, eatWeekday, nextWeekday, CAP_MAX,
+  hasPassword, passwordVar, eatWeekday, nextWeekday, sendingDay, CAP_MAX,
   LANES, LANE_LABEL, laneOf, laneOpts, normLane, contactLane, cleanLanes, FIRST_TEMPLATE_CHOICES,
 } from './_settings.js';
 import {
   withLock, uploadContacts, queueView, removeFromQueue, clearQueue, ensurePlan, readPlan, invalidatePlans,
   listLog, getLogBody, addLog, health, followUpsDue, scanAccount, scanAll, tick, accountsOf, testBatchPlan, sendTestBatch, testFollowUpPlan, sendTestFollowUps,
-  laneAccounts, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, senderOf, previewContact,
+  laneAccounts, runStatus, testCountKey, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, senderOf, previewContact,
   CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES,
 } from './_engine.js';
 import { checkOne, importLists, counts as suppCounts, isRoleAddress } from './_suppress.js';
@@ -66,12 +66,13 @@ const actions = {
   async overview() {
     const now = Date.now();
     const [settings, config, accounts, supp] = await Promise.all([readSettings(), readConfig(), health(now), suppCounts()]);
-    const today = eatDate(now);
+    const today = sendingDay(now, settings);
     const tomorrow = nextWeekday(today, settings.weekdays);
     const [queued, contacts, lastTick, fu] = await Promise.all([
       command('LLEN', K.queue), command('HLEN', K.contacts), command('GET', K.lastTick), command('ZCARD', K.fu),
     ]);
     const todayPlan = await readPlan(today);
+    const nextAt = Math.min(...todayPlan.items.filter((it) => it.status === 'planned').map((it) => it.at));
     const sum = (items) => items.reduce((m, it) => ((m[it.status] = (m[it.status] || 0) + 1), m), {});
     return {
       now, today, todayIsSendingDay: settings.weekdays.includes(eatWeekday(today)), tomorrow,
@@ -79,6 +80,9 @@ const actions = {
       accounts, suppression: supp,
       queue: { queued: Number(queued) || 0, contacts: Number(contacts) || 0, followUpCandidates: Number(fu) || 0 },
       todayPlan: { built: Boolean(todayPlan.meta), byStatus: sum(todayPlan.items), total: todayPlan.items.length },
+      // Today's run in plain terms (the Sending tab's and Overview's banner).
+      run: { ...runStatus(now, settings), plan: { built: Boolean(todayPlan.meta), byStatus: sum(todayPlan.items), total: todayPlan.items.length,
+        nextAt: Number.isFinite(nextAt) ? nextAt : null } },
       lastTick: Number(lastTick) || null,
       lastReplyAt: Number(await command('GET', K.lastReply)) || null,
       // Sending lanes: which accounts send for each, how many wait in its
@@ -194,7 +198,7 @@ const actions = {
   async 'plan.get'(b) {
     const now = Date.now();
     const settings = await readSettings();
-    const today = eatDate(now);
+    const today = sendingDay(now, settings);
     const date = b.date === 'tomorrow' || !b.date ? nextWeekday(today, settings.weekdays) : b.date === 'today' ? today : String(b.date);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw bad('bad date');
     let plan = await readPlan(date);
@@ -213,7 +217,7 @@ const actions = {
     return withLock(async () => {
       const n = await invalidatePlans(now, { includeUntouchedToday: true });
       const settings = await readSettings();
-      const date = b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : nextWeekday(eatDate(now), settings.weekdays);
+      const date = b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date) ? b.date : nextWeekday(sendingDay(now, settings), settings.weekdays);
       return { invalidated: n, plan: await ensurePlan(date, { now }) };
     });
   },
@@ -316,7 +320,7 @@ const actions = {
     let templateId = TEMPLATE_IDS.includes(b.templateId) ? b.templateId : 'callcenter';
     const dryRun = settings.dryRun || Boolean(b.dryRun);
     if (!dryRun && !hasPassword(account)) throw bad(`no app password set for ${account} (${passwordVar(account)})`);
-    const day = `mailer:srv:tests:${eatDate(Date.now())}`;
+    const day = testCountKey(sendingDay(Date.now(), settings));
     const n = Number(await command('HINCRBY', day, account, 1));
     await command('EXPIRE', day, 3 * 86400);
     if (n > 10) { await command('HINCRBY', day, account, -1); throw bad('10 test sends per account per day is the limit'); }

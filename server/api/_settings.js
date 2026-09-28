@@ -108,7 +108,9 @@ export const toMin = (hhmm) => {
   return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
 };
 const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-const time = (v, d, lo = 5 * 60, hi = 21 * 60) => {
+// Any time of day. Times earlier than the window start mean the next morning
+// (see dayWindow), so nothing here needs ordering.
+const time = (v, d, lo = 0, hi = 24 * 60 - 1) => {
   const m = toMin(v);
   return Number.isFinite(m) ? hhmm(Math.min(hi, Math.max(lo, m))) : d;
 };
@@ -179,7 +181,7 @@ export function cleanSettings(input = {}, prev = DEFAULT_SETTINGS) {
     perAccountCap: int(input.perAccountCap, 1, CAP_MAX, p.perAccountCap),
     minGapMin: int(input.minGapMin, 1, 60, p.minGapMin),
     maxGapMin: int(input.maxGapMin, 1, 90, p.maxGapMin),
-    lateCutoff: time(input.lateCutoff, p.lateCutoff, 6 * 60, 23 * 60),
+    lateCutoff: time(input.lateCutoff, p.lateCutoff),
     followUps: bool(input.followUps, p.followUps),
     replyCheckHours: int(input.replyCheckHours, 1, 168, p.replyCheckHours),
     footer: input.footer !== undefined ? String(input.footer).slice(0, 1000) : p.footer,
@@ -196,7 +198,9 @@ export function cleanSettings(input = {}, prev = DEFAULT_SETTINGS) {
     accountLanes: cleanAccountLanes(input.accountLanes, p.accountLanes),
     updatedAt: Date.now(),
   };
-  if (toMin(s.windowEnd) < toMin(s.windowStart)) s.windowEnd = s.windowStart;
+  // The latest start is never after the last send.
+  const w = dayWindow(s);
+  if (relMin(s, s.windowEnd) > w.cutoff) s.windowEnd = s.lateCutoff;
   if (s.maxGapMin < s.minGapMin) s.maxGapMin = s.minGapMin;
   if (!/\{\{unsubscribe(_url)?\}\}/i.test(s.footer)) s.footer = `${s.footer.trim()}\n{{unsubscribe}}`.trim();
   return s;
@@ -261,6 +265,28 @@ export const eatWeekday = (dateKey) => new Date(`${dateKey}T00:00:00Z`).getUTCDa
 export const eatAt = (dateKey, minutes) => Date.parse(`${dateKey}T00:00:00Z`) - EAT_OFFSET + minutes * 60000;
 export const eatClock = (ms) => new Date(ms + EAT_OFFSET).toISOString().slice(11, 16);
 export const addDays = (dateKey, n) => new Date(Date.parse(`${dateKey}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+// ---- the sending day
+// A sending day opens at windowStart on its date. windowEnd (the latest start)
+// and lateCutoff (no sends after) earlier than the start fall on the next
+// morning: 17:00 / 17:00 / 06:00 is Monday 17:00 -> Tuesday 06:00, all of it
+// Monday's run (its plan, its daily cap, its weekday). A cutoff equal to the
+// start is a full 24 hours. Minutes are counted from the sending day's
+// midnight, so they can pass 1440; eatAt(date, minutes) takes them as they are.
+const relMin = (s, hhmm) => { const m = toMin(hhmm), st = toMin(s.windowStart); return m < st ? m + 24 * 60 : m; };
+export function dayWindow(s) {
+  const start = toMin(s.windowStart);
+  const c = toMin(s.lateCutoff);
+  const cutoff = c <= start ? c + 24 * 60 : c;
+  return { start, end: Math.min(relMin(s, s.windowEnd), cutoff), cutoff };
+}
+// The run a moment belongs to: at Tue 02:00 with a 17:00 -> 06:00 window that
+// is Monday's; otherwise the calendar date (EAT). With a window that ends the
+// same day it is always the calendar date.
+export function sendingDay(now, s) {
+  const d = eatDate(now), prev = addDays(d, -1);
+  return now < eatAt(prev, dayWindow(s).cutoff) ? prev : d;
+}
+
 export function nextWeekday(dateKey, weekdays) {
   for (let i = 1; i <= 7; i++) {
     const d = addDays(dateKey, i);
