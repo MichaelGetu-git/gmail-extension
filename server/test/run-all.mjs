@@ -155,8 +155,8 @@ section('1. rendering is identical to the extension (content.js)');
   const nr = { email: 'n@x.example', company: 'Nick Co', segment: 'tech', _segment: 'tech' };
   const nickOf = (sender, nick) => ext.fillTemplate(nickTpl.tech.body, ext.withWording({ ...nr, sender_name: sender, nick_name: nick }));
   const srvNick = (senderName, nickName) => R.renderEmail({ contact: { ...nr }, templates: nickTpl, templateId: 'tech', senderName, nickName, token: 'nicknick00000001' }).bodyText;
-  check('{{nick_name}} identical: the nickname, else the name, else "The Zemenay team"', nickOf('Michael @ ZemenayTech', 'Mike') === srvNick('Michael @ ZemenayTech', 'Mike')
-    && srvNick('Michael @ ZemenayTech', 'Mike') === 'Hey, this is Mike.\n\nMichael' && nickOf('Berry', '') === srvNick('Berry', '') && srvNick('Berry', '') === 'Hey, this is Berry.\n\nBerry'
+  check('{{nick_name}} identical: the nickname, else the name, else "The Zemenay team"; {{sender_name}} is the name exactly as set', nickOf('Dawit @ ZemenayTech', 'Mike') === srvNick('Dawit @ ZemenayTech', 'Mike')
+    && srvNick('Dawit @ ZemenayTech', 'Mike') === 'Hey, this is Mike.\n\nDawit @ ZemenayTech' && nickOf('Berry', '') === srvNick('Berry', '') && srvNick('Berry', '') === 'Hey, this is Berry.\n\nBerry'
     && nickOf('', '') === srvNick('', '') && srvNick('', '').startsWith('Hey, this is The Zemenay team.'));
   const tok = R.newToken();
   check('tokens match the tracker format', /^[a-z0-9]{16}$/.test(tok) && tok !== R.newToken());
@@ -1572,17 +1572,16 @@ await reset();
   check('switch off: the send is not marked personalised; the stored row keeps its lines', !rec.touches[0].personal && stored.row.subject_line === 'Po, a special subject');
   await saveSettings({ paused: true });
 
-  // Sender names: the From name is the name alone, even when saved with the company.
-  check('fromHeader: the name alone, the company cut off; no name, just the address',
-    JSON.stringify(E.fromHeader('Berry @ ZemenayTech', 'b@x.example')) === JSON.stringify({ name: 'Berry', address: 'b@x.example' })
-    && E.fromHeader('Berry at ZemenayTech', 'b@x.example').name === 'Berry' && E.fromHeader('Noah', 'n@x.example').name === 'Noah'
-    && E.fromHeader('', 'b@x.example') === 'b@x.example' && E.fromHeader('  ', 'b@x.example') === 'b@x.example');
-  await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' }, body: { senders: { ...NAMES, [ACCOUNTS[2]]: 'Berry @ ZemenayTech' } } });
+  // Sender names: used exactly as set, company and all.
+  check('fromHeader: the name exactly as set (trimmed); no name, just the address',
+    JSON.stringify(E.fromHeader(' Dawit @ ZemenayTech ', 'b@x.example')) === JSON.stringify({ name: 'Dawit @ ZemenayTech', address: 'b@x.example' })
+    && E.fromHeader('Noah', 'n@x.example').name === 'Noah' && E.fromHeader('', 'b@x.example') === 'b@x.example' && E.fromHeader('  ', 'b@x.example') === 'b@x.example');
+  await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' }, body: { senders: { ...NAMES, [ACCOUNTS[2]]: 'Dawit @ ZemenayTech' } } });
   const n0 = sim.sent.length;
   const ts = await admin('test.send', { account: ACCOUNTS[2], to: 'michaelgetu21@gmail.com', templateId: 'callcenter' });
   const tm = sim.sent[n0];
-  check('a name saved as "Berry @ ZemenayTech" sends from "Berry" and signs off "Berry"', ts.status === 200 && tm?.mail.from?.name === 'Berry'
-    && /^From: Berry <berryydaniel@gmail\.com>$/m.test(tm?.raw || '') && tm?.mail.text.includes('\nBerry\nZemenay'), `${JSON.stringify(tm?.mail.from)} ${ts.raw}`);
+  check('a name saved as "Dawit @ ZemenayTech" stays exactly that: From name and {{sender_name}}', ts.status === 200 && tm?.mail.from?.name === 'Dawit @ ZemenayTech'
+    && /^From: "Dawit @ ZemenayTech" <berryydaniel@gmail\.com>$/m.test(tm?.raw || '') && tm?.mail.text.includes('\nDawit @ ZemenayTech\nZemenay'), `${JSON.stringify(tm?.mail.from)} ${(tm?.raw || '').match(/^From:.*$/m)} ${ts.raw}`);
 
   // Nicknames: saved per account, served to the extension, and filled into {{nick_name}}.
   const cfgNow = (await call(handlers.config, { headers: { 'x-team-key': 'team-test-key' } })).json;

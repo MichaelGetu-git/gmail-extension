@@ -17,7 +17,7 @@ import {
   LANES, LANE_LABEL, laneOf, laneOpts, laneCap, contactLane, normLane,
 } from './_settings.js';
 import { readConfig } from './config.js';
-import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, withWording, problems, personalise, signOffName, SEGMENTS } from './_render.js';
+import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, withWording, problems, personalise, SEGMENTS } from './_render.js';
 import { checkMany, checkOne, syncUnsubscribes } from './_suppress.js';
 import { transportFor, classifySmtpError } from './_smtp.js';
 import { scanInbox, msgIds } from './_imap.js';
@@ -31,10 +31,10 @@ const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--
 export const accountsOf = (config) => Object.keys(config.senders || {});
 // The name and nickname an account's emails use (renderEmail's senderName / nickName).
 export const senderOf = (config, account) => ({ senderName: (config.senders || {})[account] || '', nickName: (config.nicknames || {})[account] || '' });
-// The From header: the account's name alone ("Berry"), even when it was saved
-// with the company ("Berry @ ZemenayTech"); just the address when no name is set.
+// The From header: the account's name exactly as set ("Dawit @ ZemenayTech");
+// just the address when no name is set.
 export function fromHeader(name, account) {
-  const n = signOffName(name);
+  const n = String(name || '').trim();
   return n ? { name: n, address: account } : account;
 }
 // The accounts that send for one lane (Regular = every account not assigned

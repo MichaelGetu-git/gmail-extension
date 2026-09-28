@@ -274,10 +274,10 @@ it in the response.
 ### Sender names
 
 Each account's name is set on the *Templates* tab (*Signatures and extension
-limits*), for example "Berry". Server sends go out as
-`Berry <berryydaniel@gmail.com>` and sign off "Berry". A name saved with the
-company ("Berry @ ZemenayTech", "Berry at ZemenayTech") is cut to "Berry" in
-both places. An account with no name sends from its bare address and signs off
+limits*) and used exactly as typed. Set it to "Dawit @ ZemenayTech" and server
+sends go out as `"Dawit @ ZemenayTech" <address>`, and `{{sender_name}}` in a
+template is "Dawit @ ZemenayTech" too, in server sends and in the extension.
+An account with no name sends from its bare address and `{{sender_name}}` is
 "The Zemenay team".
 
 Next to each name is an optional **nickname**, used wherever a template says

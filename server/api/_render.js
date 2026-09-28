@@ -117,23 +117,16 @@ export function routeContact(row) {
   return (SEGMENTS.find((s) => s.match.test(haystack)) || {}).id || DEFAULT_SEGMENT;
 }
 
-// A From name may carry the company ("Michael at ZemenayTech", "Michael @
-// Zemenay", "Michael | Zemenay", "Michael from Zemenay"); the email signs off
-// with just the name part ("Michael").
-export function signOffName(name) {
-  const s = String(name || '').trim();
-  return s.split(/\s+(?:at|@|\||-|–|from)\s+/i)[0].trim() || s;
-}
-
 export function withWording(c) {
   const d = DEFAULT_WORDING[c._segment || routeContact(c)] || DEFAULT_WORDING.callcenter;
   return {
     ...c,
     business_type: String(c.business_type || '').trim() || d.business_type,
     pain: String(c.pain || '').trim() || d.pain,
-    sender_name: signOffName(c.sender_name) || DEFAULT_SENDER,
-    // {{nick_name}}: the account's nickname, else the name it signs with.
-    nick_name: String(c.nick_name || '').trim() || signOffName(c.sender_name) || DEFAULT_SENDER,
+    // {{sender_name}}: the account's name exactly as set ("Dawit @ ZemenayTech").
+    sender_name: String(c.sender_name || '').trim() || DEFAULT_SENDER,
+    // {{nick_name}}: the account's nickname, else its name.
+    nick_name: String(c.nick_name || '').trim() || String(c.sender_name || '').trim() || DEFAULT_SENDER,
   };
 }
 

@@ -148,7 +148,7 @@
               <div class="row"><button class="btn primary" id="tSave">Save all templates</button><span class="sub" id="tStatus"></span></div>
             </div>
             <div class="card">
-              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's name, for example "Berry". Server sends go out from that name and sign off with it (<code>{{sender_name}}</code>). Anything after " @ " or " at " (such as "@ ZemenayTech") is left out of both. The optional nickname fills <code>{{nick_name}}</code> in a template ("Hey, this is {{nick_name}}"); an account without one uses its name there. These limits apply to the extension; server sending has its own under Sending.</p></div></div>
+              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's name, used exactly as you type it, for example "Dawit @ ZemenayTech" or "Berry". Server sends go out from that name, and <code>{{sender_name}}</code> in a template is that name. The optional nickname fills <code>{{nick_name}}</code> in a template ("Hey, this is {{nick_name}}"); an account without one uses its name there. These limits apply to the extension; server sending has its own under Sending.</p></div></div>
               <div class="form" id="senders" style="grid-template-columns:1fr 1fr"></div>
               <div class="form" style="margin-top:14px">
                 <label class="f">Extension daily limit <input type="number" id="cDaily" min="1" max="200"></label>

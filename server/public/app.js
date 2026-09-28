@@ -663,7 +663,7 @@ loaders.templates = async () => {
   if (!ACCOUNTS.length) ACCOUNTS = Object.keys(cfg.senders);
   $('segTabs').innerHTML = TPL.map(([id, l]) => `<button data-seg="${id}" class="${id === seg ? 'on' : ''}"><i style="background:${segColor(id)}"></i>${l}</button>`).join('');
   $('senders').innerHTML = Object.entries(cfg.senders).map(([a, n]) =>
-    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="Name, e.g. Berry" aria-label="Name for ${esc(a)}"></label>` +
+    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="Name, e.g. Dawit @ ZemenayTech" aria-label="Name for ${esc(a)}"></label>` +
     `<label class="f"><span>Nickname <code>{{nick_name}}</code></span><input data-nick="${esc(a)}" value="${esc((cfg.nicknames || {})[a] || '')}" placeholder="Optional, e.g. Mike" aria-label="Nickname for ${esc(a)}"></label>`).join('');
   $('cDaily').value = cfg.dailyLimit; $('cFuDays').value = cfg.followUpDays; $('cTouches').value = cfg.maxTouches;
   $('pvAccount').innerHTML = Object.keys(cfg.senders).map((a) => `<option>${esc(a)}</option>`).join('');
