@@ -1,0 +1,17 @@
+{
+  "name": "gmail-list-mailer-tracker",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node test/run-all.mjs",
+    "sync-defaults": "node scripts/sync-defaults.mjs",
+    "sync-suppression": "node scripts/sync-suppression.mjs"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.9.9",
+    "imapflow": "^2.0.7",
+    "nodemailer": "^10.0.10"
+  }
+}

@@ -101,6 +101,235 @@ async function openPanel() {
   }
 }
 
+// ------------------------------------------------------------ open tracking
+
+// Every email's footer logo is served by the tracker with a per-email token,
+// and loading it is what counts as an open. This worker pulls the tracker's
+// hits, matches tokens to the history, and writes the result to `tracking` —
+// automatically every 10 minutes, and whenever the panel or dashboard asks.
+const TRACKER = "https://mailer-tracker.vercel.app";
+
+// This browser shows the logo too — in the compose window while an email is
+// written, and in review mode before it's sent. Those loads must not count, so
+// here they are redirected to the untracked copy of the logo. Recipients are
+// unaffected: their mail client fetches the image, not this browser.
+const TRACKER_HOST = new URL(TRACKER).host;
+const RULES = [
+  {
+    id: 1,
+    priority: 1,
+    action: { type: "redirect", redirect: { url: `${TRACKER}/logo.png` } },
+    condition: { urlFilter: `|${TRACKER}/api/l?`, resourceTypes: ["image"] },
+  },
+  {
+    // The old 1px pixel, still in mail sent before the logo took over.
+    id: 2,
+    priority: 1,
+    action: { type: "block" },
+    condition: { urlFilter: `||${TRACKER_HOST}/api/o`, resourceTypes: ["image"] },
+  },
+];
+
+async function installRules() {
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: RULES.map((r) => r.id),
+    addRules: RULES,
+  });
+}
+
+// A hit only counts as an open if it came after the send had settled and not
+// while this sender was looking at their own copy of the message (Gmail loads
+// that through its image proxy, which the redirect above cannot see).
+const OPEN_GRACE_MS = 10000;
+const SELF_VIEW_WINDOW_MS = 60000;
+
+// Pure: tracker events + history + self-views in, per-contact open stats out.
+function computeTracking(history, events, selfViews) {
+  const opens = events.opens || {};
+  const unsub = events.unsub || {};
+  const byEmail = {};
+
+  for (const rec of Object.values(history)) {
+    const touches = (rec.touches || []).filter((t) => t.t);
+    if (!touches.length) continue;
+    const e = { opens: 0, openedAt: null, lastOpenAt: null, via: "", unsubscribedAt: null };
+
+    for (const touch of touches) {
+      const mine = (selfViews[touch.t] || []).filter(([, acct]) =>
+        !acct || !touch.from || acct === touch.from);
+      const real = (opens[touch.t] || []).filter(([at]) =>
+        at >= touch.at + OPEN_GRACE_MS &&
+        !mine.some(([seenAt]) => Math.abs(seenAt - at) < SELF_VIEW_WINDOW_MS));
+      e.opens += real.length;
+      for (const [at, via] of real) {
+        if (!e.openedAt || at < e.openedAt) e.openedAt = at;
+        if (!e.lastOpenAt || at > e.lastOpenAt) { e.lastOpenAt = at; e.via = via; }
+      }
+      const u = unsub[touch.t];
+      if (u && (!e.unsubscribedAt || u < e.unsubscribedAt)) e.unsubscribedAt = u;
+    }
+    byEmail[rec.email] = e;
+  }
+  return byEmail;
+}
+
+// Campaign totals for the public page at the tracker's root. Counts only —
+// per day and per offer — never a name or an address; the per-contact view
+// stays in the extension's own dashboard.
+function buildReport(history, byEmail) {
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const seg = (s) => (/^callcenter/.test(s || "") ? "callcenter" : ["tech", "va"].includes(s) ? s : "other");
+  const since = Date.now() - 60 * 86400000;
+  const r = { contacts: 0, emails: 0, tracked: 0, opened: 0, replied: 0, bounced: 0, unsubscribed: 0,
+    bySegment: {}, byDay: {}, via: { gmail: 0, outlook: 0, yahoo: 0, other: 0 } };
+  const bump = (d, k) => { if (d >= day(since)) (r.byDay[d] ||= { sent: 0, opened: 0, replied: 0 })[k]++; };
+
+  for (const h of Object.values(history)) {
+    const o = byEmail[h.email];
+    const g = (r.bySegment[seg(h.segment)] ||= { contacts: 0, tracked: 0, opened: 0, replied: 0 });
+    r.contacts++; g.contacts++;
+    for (const t of h.touches || []) { r.emails++; if (t.at) bump(day(t.at), "sent"); }
+    if (o) { r.tracked++; g.tracked++; }
+    if (o?.openedAt) {
+      r.opened++; g.opened++; bump(day(o.openedAt), "opened");
+      r.via[o.via in r.via ? o.via : "other"]++;
+    }
+    if (h.repliedAt) { r.replied++; g.replied++; bump(day(h.repliedAt), "replied"); }
+    if (h.bouncedAt) r.bounced++;
+    if (h.unsubscribedAt || o?.unsubscribedAt) r.unsubscribed++;
+  }
+  return r;
+}
+
+// Each browser reports under its own random id, made once and kept, so the
+// page adds a team's machines together instead of one overwriting another.
+// Held as a promise so two syncs starting together can't each mint an id.
+let installIdPromise = null;
+function installId() {
+  installIdPromise ??= (async () => {
+    const { installId: id } = await chrome.storage.local.get(["installId"]);
+    if (id) return id;
+    const fresh = Array.from(crypto.getRandomValues(new Uint8Array(20)), (b) => (b % 36).toString(36)).join("");
+    await chrome.storage.local.set({ installId: fresh });
+    return fresh;
+  })();
+  return installIdPromise;
+}
+
+async function pushReport(history, byEmail) {
+  await fetch(`${TRACKER}/api/report`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ install: await installId(), report: buildReport(history, byEmail) }),
+  });
+}
+
+let syncInFlight = null;
+
+// Concurrent callers (the alarm, the panel, the dashboard) share one fetch.
+function syncTracking() {
+  syncInFlight ??= (async () => {
+    try {
+      // Needs the team key since /api/events stopped being public.
+      const res = await teamFetch("/api/events");
+      if (!res.ok) throw new Error(`tracker returned ${res.status}`);
+      const events = await res.json();
+      if (events.configured === false) throw new Error("tracker has no database connected");
+
+      const { history = {}, selfViews = {} } = await chrome.storage.local.get(["history", "selfViews"]);
+      const byEmail = computeTracking(history, events, selfViews);
+      await chrome.storage.local.set({ tracking: { syncedAt: Date.now(), byEmail } });
+      // The public page is a convenience; a failed push never fails the sync.
+      await pushReport(history, byEmail).catch(() => {});
+      // Same for the suppression exchange with server-side sending.
+      await syncServerContacted(history).catch(() => {});
+
+      const rows = Object.values(byEmail);
+      return {
+        ok: true,
+        tracked: rows.length,
+        opened: rows.filter((r) => r.openedAt).length,
+        unsubscribed: rows.filter((r) => r.unsubscribedAt).length,
+      };
+    } finally {
+      syncInFlight = null;
+    }
+  })();
+  return syncInFlight;
+}
+
+// The Gmail tab says "history changed" after every send. Sends come every few
+// seconds, so this waits for a quiet moment and syncs once rather than per send
+// — the stats page is then current within seconds of a run, not ten minutes.
+let historyTimer = null;
+function historyChanged() {
+  clearTimeout(historyTimer);
+  historyTimer = setTimeout(() => syncTracking().catch(() => {}), 5000);
+}
+
+// Built into every copy so the team's extensions can read the dashboard's
+// settings and claim leads with nothing to configure. The server holds the
+// same value as TEAM_KEY.
+const TEAM_KEY = "e6fc3f799b9b93fd1c1f6da86b023da4a7e8d453d2bd095a";
+const teamFetch = (path, init = {}) =>
+  fetch(`${TRACKER}${path}`, { ...init, cache: "no-store",
+    headers: { "content-type": "application/json", "x-team-key": TEAM_KEY, ...(init.headers || {}) } });
+
+// Templates, limits and the team list from the dashboard, kept in storage for
+// the Gmail tabs to apply.
+async function syncConfig() {
+  const res = await teamFetch("/api/config");
+  if (!res.ok) throw new Error(`dashboard returned ${res.status}`);
+  const cfg = await res.json();
+  await chrome.storage.local.set({ remoteConfig: cfg });
+  return cfg;
+}
+
+// The dashboard can also send on its own (server-side, over SMTP). The two
+// must never email the same person, so every sync swaps lists both ways:
+// this browser's history and do-not-email list go up, and the addresses the
+// server has emailed come down into `serverContacted`, which the Gmail tab's
+// send loop skips. The upload is skipped when nothing changed in 12 hours.
+async function syncServerContacted(history) {
+  const { suppressed = [], contactedPush = {} } = await chrome.storage.local.get(["suppressed", "contactedPush"]);
+  const mine = [...new Set([...Object.keys(history || {}), ...(Array.isArray(suppressed) ? suppressed : [])]
+    .map((e) => String(e || "").trim().toLowerCase()).filter(Boolean))];
+  if (mine.length !== contactedPush.count || Date.now() - (contactedPush.at || 0) > 12 * 3600000) {
+    const up = await teamFetch("/api/leads", { method: "POST", body: JSON.stringify({ contacted: mine }) });
+    if (up.ok) await chrome.storage.local.set({ contactedPush: { count: mine.length, at: Date.now() } });
+  }
+  const res = await teamFetch("/api/leads?contacted=1");
+  if (!res.ok) return;
+  const d = await res.json();
+  if (Array.isArray(d.contacted)) {
+    await chrome.storage.local.set({ serverContacted: d.contacted.map((e) => String(e).toLowerCase()), serverContactedAt: Date.now() });
+  }
+}
+
+async function claimLeads(account, count) {
+  const res = await teamFetch("/api/leads", { method: "POST", body: JSON.stringify({ claim: count, account }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || `dashboard returned ${res.status}`);
+  return d;
+}
+
+const ALARM = "tracking-sync";
+
+function startTracking() {
+  installRules().catch(() => {});
+  syncConfig().catch(() => {});
+  chrome.alarms.create(ALARM, { periodInMinutes: 10, delayInMinutes: 1 });
+  syncTracking().catch(() => {});
+}
+
+chrome.runtime.onInstalled.addListener(startTracking);
+chrome.runtime.onStartup.addListener(startTracking);
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name !== ALARM) return;
+  syncTracking().catch(() => {});
+  syncConfig().catch(() => {});
+});
+
 // Walks every signed-in Gmail account and pulls its Sent mail, replies and
 // bounces into the shared history — so the dashboard shows everything sent from
 // every address without anyone opening each mailbox and clicking Import.
@@ -206,6 +435,26 @@ async function syncAllAccounts({ days = 180, onStep } = {}) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "SYNC_CONFIG") {
+    syncConfig().then((c) => sendResponse({ ok: true, version: c.version }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+  if (msg.type === "CLAIM_LEADS") {
+    claimLeads(msg.account, msg.count).then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message || String(err) }));
+    return true;
+  }
+  if (msg.type === "HISTORY_CHANGED") {
+    historyChanged();
+    return false;
+  }
+  if (msg.type === "SYNC_TRACKING") {
+    syncTracking()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
   if (msg.type === "GET_ACCOUNT") {
     getAccount().then(sendResponse);
     return true;

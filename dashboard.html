@@ -103,6 +103,7 @@
   td.wrap { white-space: normal; max-width: 260px; }
   .pill { font-size: 10.5px; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--line); color: var(--text-2); }
   .pill.replied { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+  .pill.opened { color: var(--s2); border-color: color-mix(in srgb, var(--s2) 40%, transparent); }
   .pill.bounced { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
   .scroll { overflow-x: auto; }
   input[type=search] {
@@ -152,6 +153,9 @@
   </header>
 
   <div id="syncbar" class="syncbar hidden"></div>
+  <p class="sub" style="margin:8px 0 0">Totals only (no names) are also published at
+    <a href="https://mailer-tracker.vercel.app" target="_blank" rel="noopener">mailer-tracker.vercel.app</a>,
+    for sharing with the team.</p>
   <p class="sub" id="readout" style="margin:8px 0 0"></p>
 
   <div id="empty" class="drop">
@@ -164,15 +168,30 @@
 
     <section>
       <h2>Activity</h2>
-      <p class="cap">Emails sent and replies received, by day.</p>
+      <p class="cap">Emails sent, first opens and replies, by day.</p>
       <div class="card">
         <div class="legend">
           <span><i style="background:var(--s1)"></i>Emails sent</span>
+          <span><i style="background:var(--s2)"></i>Opened</span>
           <span><i style="background:var(--good)"></i>Replies</span>
         </div>
         <div id="timeline"></div>
       </div>
     </section>
+
+    <div class="grid2">
+      <section>
+        <h2>Opens by offer</h2>
+        <p class="cap">Open rate per template: a test of the subject line. A good subject line with a
+          low reply rate means the email body needs work.</p>
+        <div class="card"><div id="opensBySegment"></div></div>
+      </section>
+      <section>
+        <h2>Recently opened</h2>
+        <p class="cap" id="hotCount"></p>
+        <div class="card"><div class="scroll" id="recentOpens"></div></div>
+      </section>
+    </div>
 
     <div class="grid2">
       <section>
@@ -189,8 +208,9 @@
 
     <section id="accountsWrap" class="hidden">
       <h2>By sending address</h2>
-      <p class="cap">Reply and bounce rate per mailbox. Deliverability is a property of the
-        sending domain, so a gap between these is a domain problem, not a copy problem.</p>
+      <p class="cap">Open, reply and bounce rate per mailbox. Deliverability is a property of the
+        sending domain, so a gap between these is a domain problem, not a copy problem. Near-zero opens
+        on one address usually means its mail is landing in spam.</p>
       <div class="card"><div class="scroll"><table id="byAccount"></table></div></div>
     </section>
 
@@ -213,13 +233,16 @@
     </section>
 
     <section>
-      <h2>What is not measured here</h2>
+      <h2>How opens are counted</h2>
       <div class="note-box">
-        <strong>Open rates are deliberately absent.</strong> Measuring them needs a tracking pixel,
-        and Gmail proxies and pre-fetches images through its own cache — so a large share of
-        "opens" are Google, not a person. A pixel is also itself a spam signal, which would damage
-        the deliverability this page exists to monitor. Replies and bounces are counted because
-        they are real events; opens would be a number that looks precise and means very little.
+        An open is counted when the recipient's mail app loads the Zemenay logo in the footer. Each
+        email's logo carries its own code, so every open is tied to one contact. Your own views don't
+        count: not while you write the email, and not when you look at it in Sent.
+        <br><br>
+        <strong>Treat the rate as an estimate.</strong> Apple Mail loads every image on arrival, so its
+        users show as opened whether they read it or not. Outlook and many company inboxes block
+        images, so some real reads never show up. It's reliable for comparing templates and spotting a
+        domain going to spam. Replies remain the number to trust.
       </div>
     </section>
   </div>

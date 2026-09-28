@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Zemenay Outreach</title>
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div id="boot"><div class="spinner" aria-label="Loading"></div></div>
+
+<!-- ============================================================ SIGN IN -->
+<div id="login" class="hidden">
+  <form class="login-card" id="loginForm" autocomplete="on" novalidate>
+    <img class="logo" src="/logo.png" alt="Zemenay">
+    <h1>Sign in to Outreach</h1>
+    <p class="lede">The outreach dashboard for the Zemenay team.</p>
+    <div class="login-note hidden" id="loginNote"></div>
+    <div class="login-err hidden" id="loginErr" role="alert"></div>
+    <input type="text" name="username" value="admin" autocomplete="username" class="hidden" aria-hidden="true" tabindex="-1">
+    <label class="field"><span>Admin password</span>
+      <div class="pw-wrap">
+        <input id="pw" type="password" autocomplete="current-password" placeholder="Enter the admin password" required>
+        <button type="button" id="pwShow" aria-label="Show password">Show</button>
+      </div>
+    </label>
+    <button class="btn primary" id="pwGo" type="submit">Sign in</button>
+    <p class="login-foot">You stay signed in until you close this tab or sign out.</p>
+  </form>
+</div>
+
+<!-- ============================================================ APP -->
+<div id="shell" class="hidden">
+  <aside class="side">
+    <div class="brand"><img src="/logo.png" alt="Zemenay"><span>Outreach</span></div>
+    <nav class="nav" id="nav">
+      <button data-view="overview"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Overview</button>
+      <button data-view="replies"><svg viewBox="0 0 24 24"><path d="M9 17 4 12l5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>Replies<span class="nbadge hidden" id="repBadge"></span></button>
+      <button data-view="templates"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 7 8 6 8-6"/></svg>Templates</button>
+      <button data-view="sending"><svg viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>Sending</button>
+      <button data-view="queue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Queue</button>
+      <button data-view="log"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Send log</button>
+      <button data-view="contacts"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Contacts &amp; suppression</button>
+      <button data-view="leads"><svg viewBox="0 0 24 24"><path d="M12 2c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3-1-5.5 1-8.5z"/></svg>Hot leads</button>
+    </nav>
+    <div class="grow"></div>
+    <div class="side-status" id="sideStatus"></div>
+    <button class="signout" id="signOut"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></svg>Sign out</button>
+  </aside>
+
+  <main>
+    <div class="topbar" id="topbar">
+      <div><h1 id="vTitle">Overview</h1><div class="desc" id="vDesc"></div></div>
+      <div class="spacer"></div>
+      <span class="sub" id="updated"></span>
+      <button class="btn small" id="refresh" title="Refresh"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Refresh</button>
+    </div>
+    <div class="content">
+
+      <!-- ======================================================== OVERVIEW -->
+      <section class="view" id="v-overview">
+        <div id="ovBanner"></div>
+        <div id="ovReplyHealth"></div>
+        <div class="srcbar"><span class="sub">Rates from</span>
+          <div class="seg" id="srcMode"><button data-src="server" class="on">Dashboard sends</button><button data-src="all">Dashboard + extension</button></div></div>
+        <div class="grid g-kpi mb" id="kpis"></div>
+
+        <div class="card mb">
+          <div class="card-h"><div><h2>Latest replies</h2><p class="cap">Who answered a dashboard email, and when. Every inbox is checked for replies every few minutes; out-of-office auto-replies are kept apart and never count toward the reply rate.</p></div><div class="spacer"></div>
+            <div class="row"><button class="btn small" id="ovScan">Check inboxes now</button><button class="btn small" id="ovAllReplies">See all replies</button></div></div>
+          <div class="tbl-wrap"><table id="ovReplies" class="nowrap"></table></div>
+        </div>
+
+        <div class="card mb">
+          <div class="card-h"><div><h2>Personalised vs standard</h2><p class="cap" id="pzCap">Contacts whose first email carried their own subject line or opening line, against standard emails sent over the same period. Replies are exact; opens are approximate.</p></div><div class="spacer"></div>
+            <button class="btn small" id="pzSeeQueue">See personal lines</button></div>
+          <div id="pzBody"></div>
+        </div>
+
+        <div class="grid g-2-1 mb">
+          <div class="card">
+            <div class="card-h"><div><h2>Sends per day</h2><p class="cap">Last 30 days, every email sent by the extension and the server.</p></div><div class="spacer"></div>
+              <div class="seg" id="sendsMode"><button data-mode="account" class="on">By account</button><button data-mode="segment">By segment</button></div></div>
+            <div class="legend" id="sendsLegend"></div>
+            <div class="chart" id="chSends"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><div><h2>Funnel</h2><p class="cap">Contacts emailed, then how many opened and replied.</p></div></div>
+            <div id="funnel"></div>
+          </div>
+        </div>
+
+        <div class="grid g-2-1 mb">
+          <div class="card">
+            <div class="card-h"><div><h2>Engagement rates</h2><p class="cap" id="ratesCap">Rolling 7-day rates.</p></div></div>
+            <div class="legend" id="ratesLegend"></div>
+            <div class="chart" id="chRates"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><div><h2>Follow-up pipeline</h2><p class="cap">Server-sent contacts still in rotation.</p></div></div>
+            <div id="pipeline"></div>
+          </div>
+        </div>
+
+        <div class="card mb">
+          <div class="card-h"><div><h2>Account health</h2><p class="cap">Last 14 days of sends per account, today's progress against the cap, and bounce rate over the last 50 sends. Above 5% the account pauses itself.</p></div></div>
+          <div class="grid g-acc" id="ovAccounts"></div>
+        </div>
+
+        <div class="card mb">
+          <div class="card-h"><div><h2>Send schedule</h2><p class="cap" id="tlCap">Planned send times per account, EAT.</p></div><div class="spacer"></div>
+            <button class="btn small" id="ovPlanBuild">Plan next sending day</button></div>
+          <div class="legend" id="tlLegend"></div>
+          <div id="ovTimeline"></div>
+        </div>
+
+        <div class="grid g-1-1 mb">
+          <div class="card">
+            <div class="card-h"><div><h2>Performance by segment</h2><p class="cap">Open rate tests the subject line; reply rate tests the email. All sends.</p></div></div>
+            <div class="chart lg" id="chSegPerf"></div>
+            <div class="tbl-wrap" style="margin-top:14px"><table id="segPerfT"></table></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><div><h2>Template versions</h2><p class="cap">Server sends per template and saved version (versions are recorded from this release on).</p></div></div>
+            <div class="tbl-wrap"><table id="tplPerf"></table></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><div><h2>How opens are counted</h2></div></div>
+          <p class="note">An open is counted when a recipient's mail app loads the Zemenay logo in the email's footer. The extension leaves your own views out; server-side numbers can't tell them apart. Treat the rate as an estimate: Apple Mail loads every image on arrival, so its users count as opened whether or not they read it, and many company inboxes block images, so some real reads never show. Replies are the number to trust.</p>
+        </div>
+      </section>
+
+      <!-- ======================================================== TEMPLATES -->
+      <section class="view hidden" id="v-templates">
+        <div class="grid g-1-1">
+          <div>
+            <div class="card mb">
+              <div class="tabs" id="segTabs"></div>
+              <div class="tplstats" id="tplStats"></div>
+              <label class="f">Subject <input id="tSubject"></label>
+              <label class="f" style="margin-top:12px">Body <textarea id="tBody" rows="17"></textarea></label>
+              <p class="cap" style="margin-top:8px">Placeholders: any CSV column as <code>{{column}}</code>, plus <code>{{sender_name}}</code>. <code>{{business_type}}</code> and <code>{{pain}}</code> fall back to the segment's default wording when the row has none. Saving updates every copy of the extension within 10 minutes, and the server's own sending.</p>
+              <div class="row"><button class="btn primary" id="tSave">Save all templates</button><span class="sub" id="tStatus"></span></div>
+            </div>
+            <div class="card">
+              <div class="card-h"><div><h2>Signatures and extension limits</h2><p class="cap">Each account's From name for server sends, for example "Michael at ZemenayTech". Emails sign off (<code>{{sender_name}}</code>) with just the name before " at " ("Michael"). These limits apply to the extension; server sending has its own under Sending.</p></div></div>
+              <div class="form" id="senders" style="grid-template-columns:1fr 1fr"></div>
+              <div class="form" style="margin-top:14px">
+                <label class="f">Extension daily limit <input type="number" id="cDaily" min="1" max="200"></label>
+                <label class="f">Follow up after (days) <input type="number" id="cFuDays" min="1" max="60"></label>
+                <label class="f">Max touches <input type="number" id="cTouches" min="1" max="5"></label>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="card mb">
+              <div class="card-h"><div><h2>Live preview</h2><p class="cap" id="pvWho">—</p></div></div>
+              <div class="row" style="margin-bottom:10px">
+                <button class="btn small" id="pvPrev">‹ Previous contact</button><button class="btn small" id="pvNext">Next contact ›</button>
+                <select id="pvAccount"></select>
+              </div>
+              <div id="pvWarn" style="margin-bottom:8px"></div>
+              <div class="pv" id="pvText"></div>
+              <p class="cap" style="margin:12px 0 8px">As the recipient sees it (logo shown untracked here):</p>
+              <iframe class="mail" id="pvHtml" sandbox=""></iframe>
+            </div>
+            <div class="card">
+              <div class="card-h"><div><h2>Version history</h2><p class="cap">The last 20 saved versions. Restoring saves it as a new version, so the extension picks it up too.</p></div></div>
+              <div class="tbl-wrap"><table id="hist" class="nowrap"></table></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== SENDING -->
+      <section class="view hidden" id="v-sending">
+        <div id="pauseBanner"></div>
+        <div class="card mb">
+          <div class="card-h"><div><h2>Accounts</h2><p class="cap">Sends from the server over Gmail SMTP with each account's app password. An account pauses itself on a login failure, 3 failures in a row, or a bounce rate above 5%. The <b>Lane</b> column decides which contacts an account sends: Regular (the main Contacts list), Work or Hot (the Hot leads page). Lanes never mix.</p></div></div>
+          <div class="grid g-acc mb" id="sAccounts"></div>
+          <div class="tbl-wrap"><table id="accts" class="nowrap"></table></div>
+          <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line-2)">
+            <div class="sub" style="margin-bottom:8px;font-weight:600;color:var(--text-2)">Add a sending account</div>
+            <div class="form" style="grid-template-columns:2fr 1.4fr 1fr auto;align-items:end">
+              <label class="f">Email address <input id="addAcct" type="email" placeholder="you@yourcompany.com"></label>
+              <label class="f">Signature name <input id="addName" placeholder="Rafael"></label>
+              <label class="f">Lane <select id="addLane"><option value="work">Work</option><option value="hot">Hot</option><option value="regular">Regular</option></select></label>
+              <button class="btn primary" id="addGo">Add account</button>
+            </div>
+            <p class="cap" id="addStatus" style="margin:8px 0 0">Gmail or Google Workspace addresses (sent through smtp.gmail.com). The account sends nothing until its app password is set in Vercel (the variable name is shown after adding) and the project is redeployed; sending also stays under the global pause.</p>
+          </div>
+        </div>
+        <div class="card mb">
+          <div class="card-h"><div><h2>Schedule and safety</h2><p class="cap">Times are Africa/Nairobi (EAT, UTC+3). Each account gets its own random start inside the window every sending day, then sends its quota with random gaps. Follow-ups count toward the cap.</p></div></div>
+          <div class="form">
+            <label class="f">Window start <input id="sWs" type="time"></label>
+            <label class="f">Window end (latest start) <input id="sWe" type="time"></label>
+            <label class="f">No sends after <input id="sCut" type="time"></label>
+            <label class="f"><span>Per account per day (max <span id="capMax">40</span>)</span><input id="sCap" type="number" min="1" max="40"></label>
+            <label class="f">Min gap (minutes) <input id="sMin" type="number" min="1" max="60"></label>
+            <label class="f">Max gap (minutes) <input id="sMax" type="number" min="1" max="90"></label>
+            <label class="f">Reply check freshness (hours) <input id="sFresh" type="number" min="1" max="168"></label>
+          </div>
+          <div style="margin-top:16px"><div class="sub" style="margin-bottom:6px;font-weight:550;color:var(--text-2)">Sending days</div><div class="days" id="sDays"></div></div>
+          <div class="checks" style="margin-top:16px">
+            <label class="chk"><input type="checkbox" id="sFu"> Send follow-ups</label>
+            <label class="chk"><input type="checkbox" id="sRole"> Skip role addresses (info@, office@…)</label>
+            <label class="chk"><input type="checkbox" id="sFree"> Domain list ignores gmail.com etc.</label>
+            <label class="chk"><input type="checkbox" id="sBlock"> Hold emails with missing or empty placeholders</label>
+            <label class="chk"><input type="checkbox" id="sLU"> List-Unsubscribe header</label>
+            <label class="chk"><input type="checkbox" id="sDry"> Dry-run (render and log, never send)</label>
+            <label class="chk"><input type="checkbox" id="sRegPlain"> Regular lane: Plain text (no footer, no tracking)</label>
+            <label class="chk"><input type="checkbox" id="sRegOpt"> Regular lane, plain text: add a one-line opt-out sentence</label>
+          </div>
+          <p class="cap" style="margin:8px 0 0">Plain text sends a text/plain email only: no HTML, no footer, no logo or open pixel, no tracked or unsubscribe link, no List-Unsubscribe header. Opens are not tracked for those emails; replies, bounces and follow-up stop rules still work. Off for Regular by default. Work and Hot have their own switches on the Hot leads page.</p>
+          <label class="f" style="margin-top:16px"><span>Footer for server-sent mail (<code>{{unsubscribe}}</code> becomes the link)</span><textarea id="sFooter" rows="3"></textarea></label>
+          <label class="f" style="margin-top:16px"><span>Test recipients: the only addresses "Send test batch now" can email (one per line, max 10)</span><textarea id="sTestTo" rows="3"></textarea></label>
+          <div class="row" style="margin-top:14px"><button class="btn primary" id="sSave">Save schedule</button><span class="sub" id="sStatus"></span></div>
+        </div>
+        <div class="card mb">
+          <div class="card-h"><div><h2>Test batch (Regular lane)</h2><p class="cap">Work and Hot have their own test buttons on the Hot leads page. Runs the real pipeline right now, only for contacts on the test-recipient list above, even while paused and outside the sending window; nobody else is touched. <b>Send test batch now</b> sends a first email, one per account, to allowlisted contacts in the queue. <b>Send test follow-up now</b> sends the next follow-up (same account, follow-up template, next touch, up to the max) to allowlisted contacts already emailed, skipping the wait; it checks those inboxes for replies first, and anyone who replied, bounced or unsubscribed is skipped. Daily caps and auto-pause still apply; max 10 test emails per account per day (shared with Test send). You confirm the exact recipients first.</p></div></div>
+          <div class="row"><button class="btn primary" id="tbGo">Send test batch now</button><button class="btn" id="tfGo">Send test follow-up now</button><span class="sub" id="tbStatus"></span></div>
+          <div id="tbOut" class="sub" style="margin-top:10px"></div>
+        </div>
+        <div class="grid g-1-1">
+          <div class="card">
+            <div class="card-h"><div><h2>Test send</h2><p class="cap">Sends one rendered sample, subject prefixed [TEST], from the chosen account to the address you type. Works while paused; max 10 per account per day.</p></div></div>
+            <div class="form" style="grid-template-columns:1fr 1fr">
+              <label class="f">From <select id="tsAcct"></select></label>
+              <label class="f">Template <select id="tsTpl"></select></label>
+            </div>
+            <div class="row" style="margin-top:12px"><input id="tsTo" type="email" placeholder="your own address" style="flex:1;min-width:220px"><button class="btn" id="tsGo">Send test</button></div>
+            <p class="sub" id="tsStatus" style="margin:10px 0 0"></p>
+          </div>
+          <div class="card">
+            <div class="card-h"><div><h2>Trigger and server status</h2></div></div>
+            <div id="envBox"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======================================================== QUEUE -->
+      <section class="view hidden" id="v-queue">
+        <div class="card mb">
+          <div class="card-h"><div><h2>Planned sends</h2><p class="cap" id="planCap">—</p></div><div class="spacer"></div>
+            <div class="seg" id="planWhich"><button data-plan="today">Today</button><button data-plan="tomorrow" class="on">Next sending day</button></div>
+            <button class="btn small" id="planRebuild">Rebuild next day</button></div>
+          <div class="legend" id="qTlLegend"></div>
+          <div id="qTimeline" class="mb"></div>
+          <div class="tbl-wrap"><table id="plan" class="nowrap"></table></div>
+        </div>
+        <div class="grid g-1-1 mb">
+          <div class="card">
+            <div class="card-h"><div><h2>Follow-ups due</h2><p class="cap">Next 7 days, per day.</p></div></div>
+            <div class="chart sm" id="chFuDue"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><div><h2>Follow-up list</h2><p class="cap" id="fuCap"></p></div></div>
+            <div class="tbl-wrap" style="max-height:260px;overflow:auto"><table id="fus" class="nowrap"></table></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h2>Waiting for a first email (Regular lane)</h2><p class="cap" id="qCap">—</p></div><div class="spacer"></div>
+            <div class="seg" id="qFilter"><button data-f="all" class="on">All</button><button data-f="personal">Personalised</button><button data-f="standard">Standard</button></div>
+            <button class="btn small danger" id="qClear">Clear queue</button></div>
+          <div id="qCoverage"></div>
+          <div class="tbl-wrap"><table id="queue" class="nowrap"></table></div>
+        </div>
+      </section>
+
+      <!-- ======================================================== LOG -->
+      <section class="view hidden" id="v-log">
+        <div class="card mb">
+          <div class="card-h"><div><h2>Activity</h2><p class="cap">Send log entries per day by outcome, last 14 days.</p></div></div>
+          <div class="legend" id="logLegend"></div>
+          <div class="chart sm" id="chLog"></div>
+        </div>
+        <div class="card">
+          <div class="row" style="margin-bottom:14px">
+            <input id="lQ" placeholder="Search recipient, subject, error…" style="flex:1;min-width:220px">
+            <select id="lStatus"><option value="">All statuses</option><option>sent</option><option>failed</option><option>bounced</option><option>skipped</option><option>deferred</option><option>dry-run</option><option>replied</option><option>auto-reply</option><option>test</option><option>test (dry-run)</option></select>
+            <select id="lAcct"><option value="">All accounts</option></select>
+            <button class="btn primary" id="lGo">Search</button>
+          </div>
+          <div class="tbl-wrap"><table id="logT" class="nowrap"></table></div>
+          <div class="row" style="margin-top:12px"><button class="btn small" id="lPrev">‹ Newer</button><button class="btn small" id="lNext">Older ›</button><span class="sub" id="lPage"></span></div>
+        </div>
+      </section>
+
+      <!-- ======================================================== REPLIES -->
+      <section class="view hidden" id="v-replies">
+        <div id="rpHealth"></div>
+        <div class="card">
+          <div class="row" style="margin-bottom:14px">
+            <div class="seg" id="rpKind"><button data-kind="replies" class="on">People</button><button data-kind="auto">Auto-replies</button><button data-kind="all">All</button></div>
+            <input id="rpQ" placeholder="Search name, company, address, subject…" style="flex:1;min-width:220px">
+            <button class="btn primary" id="rpScan">Check inboxes now</button>
+          </div>
+          <p class="cap" id="rpSum" style="margin:0 0 10px"></p>
+          <div class="tbl-wrap"><table id="rpT" class="nowrap"></table></div>
+        </div>
+      </section>
+
+      <!-- ======================================================== CONTACTS -->
+      <section class="view hidden" id="v-contacts">
+        <div class="card mb">
+          <div class="card-h"><div><h2>Upload contacts (CSV)</h2><p class="cap">Contacts go into the <b>Regular</b> lane (the main list). You see a preview with every check before anything is imported. Everyone is checked against every suppression source on upload, when the day is planned, and again right before sending.</p></div></div>
+          <div id="upMain"></div>
+        </div>
+        <div class="card mb">
+          <div class="card-h"><div><h2>Suppression</h2><p class="cap">Never emailed: the contacted lists bundled at deploy, imported lists, opt-outs and unsubscribes, the extension's history, extension-claimed leads, the Lead Desk (if it shares this database) and everyone the server already emailed.</p></div></div>
+          <div class="grid g-1-1">
+            <div>
+              <div class="stats-grid" id="suppCounts"></div>
+              <div class="chart sm" id="chSupp"></div>
+            </div>
+            <div>
+              <div class="form" style="grid-template-columns:1fr 1fr">
+                <label class="f">List type <select id="suppKind"><option value="emails">Contacted emails</option><option value="domains">Contacted domains</option><option value="optout">Opt-outs (never email, no follow-ups)</option></select></label>
+                <label class="f">File (JSON array or one per line) <input type="file" id="suppFile" accept=".json,.txt,.csv" style="width:100%;min-width:0"></label>
+              </div>
+              <div class="row" style="margin-top:10px"><button class="btn" id="suppGo">Import list</button></div>
+              <div class="row" style="margin-top:16px"><input id="suppQ" placeholder="Check an address" style="flex:1"><button class="btn" id="suppCheck">Check</button></div>
+              <div id="suppOut" class="sub" style="margin-top:10px"></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h2>Delete test data</h2><p class="cap">Removes only the addresses you list (a test upload, your own inboxes) from the dashboard's data: contact, queue and day plans, sends, opens, replies and their send-log entries, so the rates count real prospects only. Everyone else's data is untouched. Suppression lists are kept. You see exactly what will go before anything is deleted, and a backup is kept for 180 days.</p></div></div>
+          <div class="grid g-1-1">
+            <label class="f">Addresses, one per line (up to 100)<textarea id="pgList" rows="6" spellcheck="false" placeholder="test.inbox@gmail.com"></textarea></label>
+            <div>
+              <div class="row"><button class="btn small" id="pgFill">Fill in the test recipients</button>
+                <label class="btn small" style="cursor:pointer">Take them from a CSV<input type="file" id="pgFile" accept=".csv,.txt" class="hidden"></label></div>
+              <label class="chk" style="margin-top:14px"><input type="checkbox" id="pgOptout"> Also take them off the opt-out list (only for your own test inboxes)</label>
+              <div class="row" style="margin-top:14px"><button class="btn" id="pgPreview">Preview</button><button class="btn danger" id="pgGo" disabled>Delete</button></div>
+            </div>
+          </div>
+          <div id="pgOut" style="margin-top:14px"></div>
+        </div>
+      </section>
+
+      <!-- ======================================================== HOT LEADS (Work / Hot lanes) -->
+      <section class="view hidden" id="v-leads">
+        <div class="card mb">
+          <div class="card-h"><div><h2>Lane</h2><p class="cap">Work and Hot leads are kept apart from the main Contacts list. Each lane only ever sends from the accounts assigned to it (Sending → Accounts → Lane); a lane with no account sends nothing and never borrows a Regular account. Suppression, opt-outs, the do-not-email lists, the global pause, the schedule window and the test-recipient list apply to every lane.</p></div><div class="spacer"></div>
+            <div class="seg" id="laneWhich"><button data-lane="work" class="on">Work</button><button data-lane="hot">Hot</button></div></div>
+          <div id="laneStatus"></div>
+        </div>
+        <div class="card mb">
+          <div class="card-h"><div><h2 id="lUpTitle">Upload leads (CSV)</h2><p class="cap">Same format as the main upload. Leads go into the lane picked above; someone already in another lane (or the main Contacts list) is skipped with the reason shown, and everyone is checked against every suppression source. You see a preview before anything is imported.</p></div></div>
+          <div id="upLeads"></div>
+        </div>
+        <div class="grid g-1-1 mb">
+          <div class="card">
+            <div class="card-h"><div><h2 id="lOptTitle">Sending options</h2><p class="cap">For this lane only. Saving never changes the pause.</p></div></div>
+            <div class="checks">
+              <label class="chk"><input type="checkbox" id="lPlain"> Plain text (no footer, no tracking)</label>
+              <label class="chk"><input type="checkbox" id="lOpt"> Add a one-line opt-out sentence (plain text)</label>
+              <label class="chk"><input type="checkbox" id="lFu"> Send follow-ups in this lane</label>
+            </div>
+            <p class="cap" id="lPlainNote" style="margin:8px 0 0"></p>
+            <label class="f" style="margin-top:12px">Opt-out sentence <input id="lOptText" maxlength="300"></label>
+            <div class="form" style="margin-top:12px;grid-template-columns:repeat(3,minmax(0,1fr))">
+              <label class="f"><span>Per account per day (max 40)</span><input id="lCap" type="number" min="1" max="40"></label>
+              <label class="f">First email template <select id="lTpl" style="width:100%;min-width:0"></select></label>
+              <label class="f">Follow-up template <select id="lFuTpl" style="width:100%;min-width:0"><option value="followup">Shared follow-up</option><option value="custom">This lane's own follow-up</option></select></label>
+            </div>
+            <details style="margin-top:12px" id="lCustBox"><summary class="sub" style="cursor:pointer;font-weight:600">This lane's own templates</summary>
+              <label class="f" style="margin-top:10px">First email subject <input id="lCustSub"></label>
+              <label class="f" style="margin-top:8px">First email body <textarea id="lCustBody" rows="7"></textarea></label>
+              <label class="f" style="margin-top:8px">Follow-up subject <input id="lFuSub"></label>
+              <label class="f" style="margin-top:8px">Follow-up body <textarea id="lFuBody" rows="5"></textarea></label>
+              <p class="cap" style="margin-top:6px">Placeholders work as on the Templates page (<code>{{first_name}}</code>, <code>{{company}}</code>, any CSV column, <code>{{sender_name}}</code>).</p>
+            </details>
+            <div class="row" style="margin-top:14px"><button class="btn primary" id="lSave">Save lane options</button><button class="btn" id="lPvGo">Preview first email</button><button class="btn" id="lPvFu">Preview follow-up</button><span class="sub" id="lSaveStatus"></span></div>
+            <div id="lPvBox" style="margin-top:12px"></div>
+          </div>
+          <div class="card" style="align-self:start">
+          <div class="card-h"><div><h2 id="lTestTitle">Test batch</h2><p class="cap">Same as on the Sending page, for this lane only: sends right now, even while paused, only to contacts on the test-recipient list (Sending → Schedule and safety) that are in this lane's queue, only from this lane's accounts. You confirm the exact recipients first.</p></div></div>
+          <div class="row"><button class="btn primary" id="lTbGo">Send test batch now</button><button class="btn" id="lTfGo">Send test follow-up now</button><span class="sub" id="lTbStatus"></span></div>
+          <div id="lTbOut" class="sub" style="margin-top:10px"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h2 id="lQTitle">Waiting in this lane</h2><p class="cap" id="lQCap">—</p></div><div class="spacer"></div>
+            <button class="btn small danger" id="lQClear">Clear this lane's queue</button></div>
+          <div class="tbl-wrap"><table id="lQueue" class="nowrap"></table></div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="modal hidden" id="modal"><div class="card"><div class="card-h"><h2 id="mTitle">Email</h2><div class="spacer"></div><button class="btn small" id="mClose">Close</button></div><div id="mBody"></div></div></div>
+<div class="tip" id="tip"></div>
+<div id="toast" role="status"></div>
+<script src="/vendor/chart.umd.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

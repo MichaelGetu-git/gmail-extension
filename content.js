@@ -132,6 +132,206 @@ function setBody(el, text) {
   }
 }
 
+// ------------------------------------------------------- dashboard settings
+
+// Templates, the daily limit, the follow-up delay and the team list are set on
+// the dashboard (mailer-tracker.vercel.app/admin) and pulled by the background
+// worker. A newer version there replaces what's in the panel, so every
+// salesperson sends the same current copy.
+let remote = { version: 0, dailyLimit: 10, followUpDays: 7, maxTouches: 3, senders: {} };
+
+function applyRemoteConfig(cfg, { force = false } = {}) {
+  if (!cfg || !cfg.templates) return false;
+  const newer = force || cfg.version > (remote.version || 0);
+  remote = { ...remote, ...cfg };
+  if (!newer) return false;
+  for (const seg of SEGMENTS) {
+    if (cfg.templates[seg.id]) templates[seg.id] = { ...cfg.templates[seg.id] };
+  }
+  if (ui) {
+    loadEditorFor(activeSegment);
+    renderPreview();
+    renderStats();
+  }
+  return true;
+}
+
+// The name this Gmail account signs with, from the dashboard's team list.
+function senderName() {
+  return (remote.senders || {})[String(detectAccount() || "").toLowerCase()] || DEFAULT_SENDER;
+}
+
+// Emails this account has sent today (local day), counted from the history —
+// the daily limit applies to first emails and follow-ups together.
+function sentToday(account = detectAccount()) {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const me = String(account || "").toLowerCase();
+  let n = 0;
+  for (const h of Object.values(history)) {
+    for (const t of h.touches || []) {
+      if (t.at >= start.getTime() && String(t.from || "").toLowerCase() === me) n++;
+    }
+  }
+  return n;
+}
+
+// ------------------------------------------------------ footer + open tracking
+
+// Every email gets a footer saying who sent it, where from, and how to stop
+// hearing from them. Cold mail without one is what spam filters and spam laws
+// (CAN-SPAM, CASL, GDPR/PECR) both look for.
+//
+// The Zemenay logo at the top of the footer is also the open tracker: its URL
+// carries a random token unique to that email, so the recipient's mail client
+// loading the logo is the open. There is no hidden pixel. The server never
+// learns who anyone is — the token → address mapping lives only in this
+// history. Everything points at the one tracker in server/, so there is
+// nothing to configure.
+const TRACKER = "https://mailer-tracker.vercel.app";
+
+const DEFAULT_FOOTER =
+  "Zemenay Tech · Bole, Addis Ababa, Ethiopia\n" +
+  "You're getting this because we thought your team might find it useful. " +
+  "Not interested? {{unsubscribe}}.";
+// The words the {{unsubscribe}} link shows.
+const UNSUB_LABEL = "Don't send this again";
+// A footer still saved with the previous default is read as the new one.
+const PREVIOUS_DEFAULT_FOOTER =
+  "Zemenay Tech · Bole, Addis Ababa, Ethiopia\n" +
+  "You're getting this because we thought your team might find it useful. " +
+  "Not interested? {{unsubscribe}} and we won't email you again.";
+const currentFooter = (f) => (f === undefined || f === null || f === PREVIOUS_DEFAULT_FOOTER ? DEFAULT_FOOTER : f);
+
+// Only the footer wording is editable; it is copy, like the templates.
+const DEFAULT_MAIL_SETTINGS = { footer: DEFAULT_FOOTER };
+
+let mailSettings = { ...DEFAULT_MAIL_SETTINGS };
+
+function newToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => (b % 36).toString(36)).join("");
+}
+
+// The footer as the recipient will read it. {{unsubscribe}} becomes a link to
+// this email's unsubscribe page.
+function renderFooter(contact, token, { html }) {
+  const url = `${TRACKER}/api/u?t=${token}`;
+  const MARK = "\u0000unsub\u0000";
+  const text = fillTemplate(mailSettings.footer || "", {
+    ...contact, unsubscribe: MARK, unsubscribe_url: url,
+  });
+  if (!html) return text.replace(MARK, UNSUB_LABEL);
+  return escapeHtml(text).replace(/\r?\n/g, "<br>")
+    .replace(MARK, `<a href="${url}" style="color:#8a8a8a">${UNSUB_LABEL}</a>`);
+}
+
+// The footer's own placeholders are filled by the mailer, never the CSV.
+const FOOTER_BUILTINS = /\{\{(unsubscribe|unsubscribe_url)\}\}/gi;
+const footerSource = () => String(mailSettings.footer || "").replace(FOOTER_BUILTINS, "");
+
+// 115×24 on screen; the file is drawn at 2x so it stays sharp on phones.
+const logoTag = (src) =>
+  `<img src="${src}" alt="Zemenay" width="115" height="24" ` +
+  `style="display:block;width:115px;height:24px;border:0;margin:0 0 8px">`;
+
+function buildBodyHtml(text, contact, token) {
+  return `<div>${escapeHtml(text).replace(/\r?\n/g, "<br>")}</div>` +
+    `<br><div style="color:#8a8a8a;font-size:12px;line-height:1.5">` +
+    logoTag(`${TRACKER}/api/l?t=${token}`) +
+    `${renderFooter(contact, token, { html: true })}</div>`;
+}
+
+// Inserting through execCommand keeps Gmail's editor state in step with the
+// DOM; the innerHTML fallback is for when Gmail swallows the command.
+function setBodyHtml(el, html, token) {
+  el.focus();
+  document.execCommand("selectAll", false, null);
+  document.execCommand("delete", false, null);
+  document.execCommand("insertHTML", false, html);
+  if (!el.querySelector(`img[src*="${token}"]`)) {
+    el.innerHTML = html;
+    el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+  }
+}
+
+// Gmail loads images in your own copy of a sent message through its image
+// proxy, which is indistinguishable server-side from the recipient opening it.
+// So when this account renders one of our tracked images, note when — the sync
+// then discounts hits that line up with the sender looking at their own mail.
+// (Loads straight from the compose window never reach the tracker at all: the
+// background worker swaps them for the untracked logo.)
+const PIXEL_RE = /\/api\/[ol]\?t=([a-z0-9]{12,40})/;
+let pendingSelfViews = [];
+
+function watchOwnPixels() {
+  const seen = new WeakSet();
+  const check = (img) => {
+    if (seen.has(img)) return;
+    seen.add(img);
+    if (img.closest('[contenteditable="true"]')) return; // a compose being written
+    const m = PIXEL_RE.exec(img.getAttribute("src") || "");
+    if (!m) return;
+    pendingSelfViews.push([m[1], Date.now(), detectAccount() || ""]);
+    flushSelfViews();
+  };
+  const sweep = (node) => {
+    if (node.nodeName === "IMG") check(node);
+    else node.querySelectorAll?.("img").forEach(check);
+  };
+  new MutationObserver((muts) => {
+    for (const m of muts) m.addedNodes.forEach(sweep);
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  sweep(document.documentElement);
+}
+
+let flushTimer = null;
+function flushSelfViews() {
+  clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => {
+    const batch = pendingSelfViews;
+    pendingSelfViews = [];
+    chrome.storage.local.get(["selfViews"], (d) => {
+      const views = d.selfViews && typeof d.selfViews === "object" ? d.selfViews : {};
+      for (const [token, at, account] of batch) {
+        views[token] = [...(views[token] || []), [at, account]].slice(-10);
+      }
+      // Bounded: keep the most recently viewed tokens.
+      const keys = Object.keys(views);
+      if (keys.length > 5000) {
+        keys.sort((a, b) => views[a].at(-1)[0] - views[b].at(-1)[0])
+          .slice(0, keys.length - 5000).forEach((k) => delete views[k]);
+      }
+      chrome.storage.local.set({ selfViews: views });
+    });
+  }, 1000);
+}
+
+// Opens are computed by the background worker (every 10 minutes, and on
+// demand) into their own `tracking` key, which only it writes — so it never
+// races this tab's copy of the history. This tab reads it for the stats, and
+// copies unsubscribes into the history and the do-not-email list itself.
+let tracking = { byEmail: {} };
+
+async function refreshTracking() {
+  const res = await chrome.runtime.sendMessage({ type: "SYNC_TRACKING" });
+  const d = await chrome.storage.local.get(["tracking"]);
+  tracking = d.tracking && d.tracking.byEmail ? d.tracking : { byEmail: {} };
+
+  const newly = [];
+  for (const [email, t] of Object.entries(tracking.byEmail)) {
+    if (t.unsubscribedAt && history[email] && !history[email].unsubscribedAt) {
+      history[email].unsubscribedAt = t.unsubscribedAt;
+      newly.push(email);
+    }
+  }
+  if (newly.length) {
+    await addSuppression(newly);
+    await saveHistory();
+  }
+  if (!res || !res.ok) throw new Error(res?.error || "tracker unreachable");
+  return { ...res, unsubscribed: newly.length };
+}
+
 // The panel lives in a shadow root, so document-level queries never see it.
 function findComposeDialogs() {
   return [...document.querySelectorAll('div[role="dialog"]')].filter((d) =>
@@ -300,7 +500,7 @@ async function setRecipient(dialog, email) {
   );
 }
 
-async function composeAndSend({ to, subject, body, autoSend }) {
+async function composeAndSend({ to, subject, body, html, token, autoSend }) {
   const before = findComposeDialogs();
 
   const composeBtn = await waitFor(() => pick(document, SEL.composeButton), 15000);
@@ -322,7 +522,8 @@ async function composeAndSend({ to, subject, body, autoSend }) {
 
   setNativeValue(subjEl, subject);
   await sleep(150);
-  setBody(bodyEl, body);
+  if (html) setBodyHtml(bodyEl, html, token);
+  else setBody(bodyEl, body);
   await sleep(300);
 
   if (!autoSend) {
@@ -409,18 +610,18 @@ const SEGMENTS = [
     // Businesses whose phone is the front door: someone has to answer it, and
     // the hours say nobody is there when it rings.
     match: /call.?cent|property|real.?estate|realtor|estate_agent|law|legal|attorney|notary|insurance|dental|dentist|medical|clinic|doctor|veterinar|hvac|plumb|roof|electric|contractor|trades|car_repair|motor|driving_school|funeral/i,
-    subject: "who picks up when {{company}} is {{hours_gap}}?",
+    subject: "who's answering when {{company}} is {{hours_gap}}?",
     body:
-      "Hi — I saw {{company}} is {{hours_gap}}.\n\n" +
-      "For most businesses like yours that's exactly when the calls that matter " +
-      "arrive: an emergency, a lockout, someone ringing three places and going with " +
-      "whoever answers first.\n\n" +
-      "We run outsourced front desks for companies your size — trained agents " +
-      "answering as your team, logging every call, escalating the real emergencies " +
-      "and handling the rest. Roughly $6-10/hr, with no recruiting and no payroll on " +
-      "your side.\n\n" +
-      "Worth a 15-minute call to see if your volume justifies it?\n\n" +
-      "Michael\nZemenay · Bole, Addis Ababa, Ethiopia",
+      "Hi {{company}} team,\n\n" +
+      "Did a little snooping: you're {{hours_gap}}. Fair enough, everyone deserves " +
+      "a life.\n\n" +
+      "The phone doesn't clock off when you do, though. For {{business_type}}, the " +
+      "calls that come in after hours are rarely the boring ones. {{pain}}\n\n" +
+      "We fix that. Our people pick up as your team, day or night: they book what " +
+      "can be booked, flag what's urgent, and send you a tidy summary in the " +
+      "morning. About $6-10/hr, no hiring, no payroll, no drama.\n\n" +
+      "Want to try it for a week and see what you've been missing?\n\n" +
+      "{{sender_name}}\nZemenay",
   },
   {
     id: "callcenter-generic",
@@ -428,17 +629,17 @@ const SEGMENTS = [
     // Same offer, for the majority of rows where opening hours were never
     // published. Opens on a question rather than a fact we do not have.
     match: /^$/,
-    subject: "who answers the phone at {{company}}?",
+    subject: "honest question, {{company}}: who picks up when you're slammed?",
     body:
-      "Hi — quick question about how {{company}} handles inbound calls.\n\n" +
-      "For most teams your size the phone is the front door, and it rings hardest " +
-      "exactly when everyone is busy with the customer in front of them. The calls " +
-      "that go unanswered are rarely the unimportant ones.\n\n" +
-      "We run outsourced front desks: trained agents answering as your team, logging " +
-      "every call, escalating what's urgent and handling the rest. Roughly $6-10/hr, " +
-      "with no recruiting and no payroll on your side.\n\n" +
-      "Worth a 15-minute call to see whether your volume justifies it?\n\n" +
-      "Michael\nZemenay · Bole, Addis Ababa, Ethiopia",
+      "Hi {{company}} team,\n\n" +
+      "Honest question: what happens to your phone when everyone's busy with actual " +
+      "customers?\n\n" +
+      "For {{business_type}}, a missed call is rarely a small one. {{pain}}\n\n" +
+      "We fix that. Our people pick up as your team, book what can be booked, flag " +
+      "what's urgent, and send you a tidy summary. About $6-10/hr, no hiring, no " +
+      "payroll, no drama.\n\n" +
+      "Want to try it for a week and count the calls you'd have missed?\n\n" +
+      "{{sender_name}}\nZemenay",
   },
   {
     id: "tech",
@@ -451,18 +652,17 @@ const SEGMENTS = [
     // merged to nothing and the recipient got a literal {{sample_role}}. It now
     // uses only fields the list actually carries.
     match: /tech|software|saas|engineer|developer|it\b|telecommunication|research|agency|marketing|advertising|consulting|logistics|architect/i,
-    subject: "senior developers for {{company}}, without the recruiter fee",
+    subject: "{{company}}, senior devs without the recruiter tax?",
     body:
-      "Hi — I'll be brief.\n\n" +
-      "If {{company}} is carrying work you can't staff, or paying agency rates to " +
-      "fill a seat, that's the gap we cover.\n\n" +
-      "We place vetted senior developers — React, Node, Python, React Native, DevOps " +
-      "— as contractors, usually within two weeks, and you keep the relationship " +
-      "directly. No placement fee on contract hires, and we handle payroll and " +
-      "compliance.\n\n" +
-      "Want me to send two or three profiles so you can judge the standard? Costs you " +
-      "nothing to look.\n\n" +
-      "Michael\nZemenay · Bole, Addis Ababa, Ethiopia",
+      "Hi {{company}} team,\n\n" +
+      "Guessing {{company}} has more client work than hands right now. If so: " +
+      "{{pain}}\n\n" +
+      "We've got vetted senior devs (React, Node, Python, React Native, DevOps) who " +
+      "can start in about two weeks. Contract, zero placement fee, and we handle " +
+      "payroll and compliance. You just get the work shipped.\n\n" +
+      "Want me to send two or three profiles? Worst case, you've looked at some " +
+      "very nice CVs.\n\n" +
+      "{{sender_name}}\nZemenay",
   },
   {
     id: "va",
@@ -472,19 +672,94 @@ const SEGMENTS = [
     // Previously greeted {{name}}, which is empty on every row of the send list
     // — these are business addresses, not people — so it rendered as "Hi ,".
     match: /virtual|assistant|admin|account|bookkeep|tax|finance|hotel|guest_house|hospitality|travel|education|childcare|school|beauty|hairdresser|fitness|pharmacy|optician|retail|ecommerce|shop|salon/i,
-    subject: "the admin nobody at {{company}} has time for",
+    subject: "{{company}}, who's doing your admin at 9pm?",
     body:
-      "Hi — quick one.\n\n" +
-      "Most owners I speak to at businesses like {{company}} are still doing their own " +
-      "inbox, scheduling and data entry at the end of the day, long after the actual " +
-      "work is finished.\n\n" +
-      "We place dedicated virtual assistants who take that off you — inbox and " +
-      "calendar, bookings and reminders, research, data entry, supplier follow-up. " +
-      "They work your hours and learn your systems. $6-10/hr, month to month.\n\n" +
-      "Want me to send what a first month usually looks like?\n\n" +
-      "Michael\nZemenay · Bole, Addis Ababa, Ethiopia",
+      "Hi {{company}} team,\n\n" +
+      "Bet nobody at {{company}} got into this business to spend their evenings on " +
+      "admin. And yet: {{pain}}\n\n" +
+      "We'll give you a dedicated virtual assistant who takes all of that off your " +
+      "plate: inbox, calendar, bookings, reminders, data entry, chasing suppliers. " +
+      "They work your hours and learn your systems. $6-10/hr, month to month, walk " +
+      "away whenever.\n\n" +
+      "Want to see what their first month would look like?\n\n" +
+      "{{sender_name}}\nZemenay",
+  },
+  {
+    id: "followup",
+    label: "Follow-up",
+    // Every follow-up uses this, whatever the first email offered. Routing
+    // never picks it: only the follow-up queue does.
+    match: /(?!)/,
+    subject: "still thinking it over, {{company}}?",
+    body:
+      "Hi {{company}} team,\n\n" +
+      "Following up on my note from last week, in case it got buried. (It happens. " +
+      "Honestly, that's sort of our whole point.)\n\n" +
+      "Short version: we take the calls, the admin or the dev work you don't have " +
+      "hands for, from about $6-10/hr, with no hiring and no payroll on your side.\n\n" +
+      "Worth a quick 15-minute call? If it's a no, just reply \"no\" and I'll leave " +
+      "you alone. Promise.\n\n" +
+      "{{sender_name}}\nZemenay",
   },
 ];
+
+// Per-lead wording the templates build sentences around. Lists from
+// pick-sendable.mjs carry `business_type` ("a dental practice") and `pain` (what
+// a missed call or unhandled admin costs that kind of business) on every row.
+// Any other list gets the offer's general line, so a template never renders a
+// hole or a literal {{pain}}.
+const DEFAULT_WORDING = {
+  callcenter: {
+    business_type: "a business like yours",
+    pain: "A new customer calls, hits voicemail, and hires whoever picks up next. You never even hear about it.",
+  },
+  tech: {
+    business_type: "a team like yours",
+    pain: "that's work waiting, clients nudging, and you paying recruiter rates to fill one seat.",
+  },
+  va: {
+    business_type: "a business like yours",
+    pain: "the inbox, the scheduling and the data entry are still eating your evenings.",
+  },
+};
+DEFAULT_WORDING["callcenter-generic"] = DEFAULT_WORDING.callcenter;
+
+// Who signs the email. The panel sets it from the team list on the dashboard;
+// anything that reaches here without one is signed by the team.
+const DEFAULT_SENDER = "The Zemenay team";
+
+// A From name may carry the company ("Michael at ZemenayTech", "Michael @
+// Zemenay", "Michael | Zemenay", "Michael from Zemenay"); the email signs off
+// with just the name part ("Michael").
+function signOffName(name) {
+  const s = String(name || "").trim();
+  return s.split(/\s+(?:at|@|\||-|–|from)\s+/i)[0].trim() || s;
+}
+
+function withWording(c) {
+  const d = DEFAULT_WORDING[c._segment || routeContact(c)] || DEFAULT_WORDING.callcenter;
+  return {
+    ...c,
+    business_type: String(c.business_type || "").trim() || d.business_type,
+    pain: String(c.pain || "").trim() || d.pain,
+    sender_name: signOffName(c.sender_name) || DEFAULT_SENDER,
+  };
+}
+
+// Fingerprints of built-in templates from earlier versions. A saved template
+// matching one was never edited, so it is replaced by the current default —
+// otherwise an improved default would never reach anyone who had opened the
+// panel once. Edited templates never match and are always kept.
+const PREVIOUS_DEFAULTS = new Set([
+  3439701817, 2522269182, 968422142, 803022828,   // first templates
+  1814287296, 4071683458, 193820354, 272033911,   // business-type wording, 2026-09-23
+  1141792756, 468662501, 967455894, 94282989,     // bold voice signed "Michael", 2026-09-23
+]);
+const templateHash = (t) => {
+  let h = 5381;
+  for (const ch of `${t.subject}\n${t.body}`) h = (h * 33 + ch.charCodeAt(0)) | 0;
+  return h >>> 0;
+};
 
 const DEFAULT_SEGMENT = "callcenter";
 
@@ -510,11 +785,14 @@ function routeContact(row) {
 // The failure this catches: a template referencing {{hours_gap}} against a row
 // that hasn't got one, producing "I saw Acme Ltd is ." That single blank is
 // worse than not sending at all, and there is no way to unsend it.
-function preflight(list, templates) {
+// `footer` is the footer text with the mailer's own placeholders removed, so
+// Check validates the CSV columns it uses just like the subject and body.
+function preflight(list, templates, { footer = "" } = {}) {
   const issues = { blank: [], unfilled: [], noEmail: [], dupe: [], suppressed: [] };
   const seen = new Set();
 
-  for (const c of list) {
+  for (const raw of list) {
+    const c = withWording(raw);
     const seg = c._segment || routeContact(c);
     const tpl = templates[seg] || { subject: "", body: "" };
     const email = String(c.email || "").trim().toLowerCase();
@@ -524,14 +802,14 @@ function preflight(list, templates) {
     seen.add(email);
     if (suppressed.has(email)) { issues.suppressed.push(c); continue; }
 
-    const merged = `${fillTemplate(tpl.subject, c)}\n${fillTemplate(tpl.body, c)}`;
+    const merged = `${fillTemplate(tpl.subject, c)}\n${fillTemplate(tpl.body, c)}\n${fillTemplate(footer, c)}`;
     // A placeholder that survived the merge means the column is missing entirely.
     const leftover = merged.match(/\{\{(\w+)\}\}/g);
     if (leftover) { issues.unfilled.push({ contact: c, fields: [...new Set(leftover)] }); continue; }
 
     // A field that exists but is empty is the quieter, more dangerous version:
     // the placeholder disappears and leaves a hole in the sentence.
-    const used = [...`${tpl.subject}\n${tpl.body}`.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1].toLowerCase());
+    const used = [...`${tpl.subject}\n${tpl.body}\n${footer}`.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1].toLowerCase());
     const empty = used.filter((f) => !String(c[f] ?? "").trim());
     if (empty.length) issues.blank.push({ contact: c, fields: [...new Set(empty)] });
   }
@@ -571,7 +849,7 @@ function saveHistory() {
   return new Promise((r) => chrome.storage.local.set({ history }, r));
 }
 
-function recordSend(contact, segment, subject, { followUp = false } = {}) {
+function recordSend(contact, segment, subject, { followUp = false, token = "" } = {}) {
   const key = String(contact.email || "").trim().toLowerCase();
   if (!key) return;
   const now = Date.now();
@@ -582,7 +860,7 @@ function recordSend(contact, segment, subject, { followUp = false } = {}) {
   const from = detectAccount() || "";
 
   if (existing) {
-    existing.touches.push({ at: now, segment, subject, followUp, from });
+    existing.touches.push({ at: now, segment, subject, followUp, from, t: token });
     existing.lastSentAt = now;
     if (from && !existing.account) existing.account = from;
     if (followUp) existing.followUps = (existing.followUps || 0) + 1;
@@ -599,10 +877,11 @@ function recordSend(contact, segment, subject, { followUp = false } = {}) {
       firstSentAt: now,
       lastSentAt: now,
       followUps: 0,
-      touches: [{ at: now, segment, subject, followUp: false, from }],
+      touches: [{ at: now, segment, subject, followUp: false, from, t: token }],
       repliedAt: null,
       bouncedAt: null,
       bounceReason: "",
+      unsubscribedAt: null,
     };
   }
 }
@@ -616,6 +895,7 @@ function followUpDue(afterDays = 3, maxTouches = 3) {
   return Object.values(history).filter((h) =>
     !h.repliedAt &&
     !h.bouncedAt &&
+    !h.unsubscribedAt &&
     (h.touches?.length || 1) < maxTouches &&
     now - h.lastSentAt >= afterDays * DAY
   );
@@ -988,7 +1268,7 @@ const PANEL_CSS = `
   }
   label.lbl:first-child { margin-top: 0; }
 
-  input[type=text], input[type=number], textarea {
+  input[type=text], input[type=number], input[type=password], textarea {
     width: 100%; padding: 11px 13px; font-size: 13.5px; color: #f4f6fb;
     border: 1px solid rgba(255,255,255,.16); border-radius: 14px;
     background: linear-gradient(180deg, rgba(0,0,0,.30), rgba(0,0,0,.20));
@@ -996,6 +1276,8 @@ const PANEL_CSS = `
     outline: none; resize: vertical;
   }
   textarea { min-height: 280px; line-height: 1.62; font-size: 14px; }
+  textarea#footer { min-height: 96px; font-size: 12.5px; }
+  .preview .foot { display: block; margin-top: 14px; opacity: .6; font-size: 12px; }
   input:focus, textarea:focus {
     border-color: rgba(130,175,255,.75);
     box-shadow: inset 0 1px 2px rgba(0,0,0,.35), 0 0 0 3px rgba(120,160,255,.18);
@@ -1183,7 +1465,11 @@ const PANEL_HTML = `
       <div id="account" style="font-weight:600">Checking…</div>
 
       <label class="lbl">Contact list</label>
-      <label class="drop"><input type="file" id="csv" accept=".csv"><span id="csvName">Choose CSV file</span></label>
+      <div class="actions" style="margin-top:0">
+        <button class="btn go" id="claim">Get today's leads</button>
+      </div>
+      <p class="hint" id="claimInfo">Fresh, mailbox-verified leads picked every morning, up to this account's daily limit.</p>
+      <label class="drop"><input type="file" id="csv" accept=".csv"><span id="csvName">Or choose a CSV file</span></label>
       <p class="hint">Needs an <code>email</code> column. <code>first_name</code> + <code>last_name</code> become <code>{{name}}</code>.</p>
       <p class="hint summary" id="csvInfo"></p>
       <label class="row hidden" id="unvRow"><input type="checkbox" id="unv"> Include unverified / invalid emails</label>
@@ -1208,6 +1494,12 @@ const PANEL_HTML = `
 
       <label class="lbl">Message</label>
       <textarea id="body" placeholder="Hi {{name}},&#10;&#10;..."></textarea>
+
+      <label class="lbl">Footer</label>
+      <textarea id="footer"></textarea>
+      <p class="hint">Goes under every email in small grey text, with the Zemenay logo above it.
+        <code>{{unsubscribe}}</code> becomes the unsubscribe link, and CSV columns work here too. The logo
+        is what tracks opens, so opens are counted automatically.</p>
 
       <label class="lbl">Delay between sends (sec)</label>
       <input type="number" id="delay" min="2" value="5">
@@ -1297,12 +1589,14 @@ function buildPanel() {
     panelBody: root.querySelector(".body"),
     dot: $("dot"), account: $("account"),
     csv: $("csv"), csvName: $("csvName"), csvInfo: $("csvInfo"),
+    claim: $("claim"), claimInfo: $("claimInfo"),
     unvRow: $("unvRow"), unv: $("unv"),
     rangeRow: $("rangeRow"), rangeFrom: $("rangeFrom"), rangeTo: $("rangeTo"),
     rangeCount: $("rangeCount"), list: $("list"),
     segs: $("segs"),
     subject: $("subject"), body: $("body"), delay: $("delay"), auto: $("auto"),
     keep: $("keep"), skipSup: $("skipSup"),
+    footer: $("footer"),
     checks: $("checks"), preview: $("preview"),
     pvPrev: $("pvPrev"), pvNext: $("pvNext"), pvWho: $("pvWho"),
     stats: $("stats"), scan: $("scan"), followups: $("followups"),
@@ -1378,6 +1672,8 @@ function wirePanel() {
     sizing = false;
   });
 
+  ui.claim.addEventListener("click", claimLeads);
+
   ui.csv.addEventListener("change", () => {
     const file = ui.csv.files[0];
     if (!file) return;
@@ -1415,6 +1711,8 @@ function wirePanel() {
   [ui.delay, ui.auto, ui.keep, ui.skipSup].forEach((el) =>
     el.addEventListener("change", () => { renderList(); saveState(); })
   );
+
+  ui.footer.addEventListener("input", () => { readMailSettings(); renderPreview(); saveMailSettings(); });
 
   ui.check.addEventListener("click", runPreflight);
   ui.scan.addEventListener("click", runScan);
@@ -1591,7 +1889,7 @@ function renderPreview() {
   }
 
   previewIndex = Math.max(0, Math.min(previewIndex, list.length - 1));
-  const c = list[previewIndex];
+  const c = withWording({ ...list[previewIndex], sender_name: senderName() });
   const segId = c._segment || routeContact(c);
   const seg = SEGMENTS.find((s) => s.id === segId);
   // Read the live editor for the segment on screen, so typing shows up here
@@ -1618,7 +1916,10 @@ function renderPreview() {
   ui.preview.innerHTML =
     `<span class="subj">To: ${escapeHtml(c.email)}</span>` +
     `<span class="subj">Subject: ${mark(tpl.subject)}</span>` +
-    mark(tpl.body);
+    mark(tpl.body) +
+    `<span class="foot"><img src="${TRACKER}/logo.png" alt="Zemenay" height="24" ` +
+      `style="display:block;margin-bottom:6px;background:#fff;border-radius:4px;padding:2px 4px">` +
+      `${escapeHtml(renderFooter(c, "preview0000000", { html: false }))}</span>`;
 }
 
 function stepPreview(delta) {
@@ -1642,7 +1943,7 @@ function runPreflight() {
     return;
   }
 
-  const issues = preflight(list, templates);
+  const issues = preflight(list, templates, { footer: footerSource() });
   const blocked = issues.noEmail.length + issues.dupe.length +
     (ui.skipSup.checked ? issues.suppressed.length : 0);
   const sendable = list.length - blocked;
@@ -1680,7 +1981,7 @@ function runPreflight() {
 
   // Show the first contact of the segment being edited, so the preview matches
   // the template on screen rather than an unrelated one.
-  const sample = list.find((c) => (c._segment || routeContact(c)) === activeSegment) || list[0];
+  const sample = withWording(list.find((c) => (c._segment || routeContact(c)) === activeSegment) || list[0]);
   const tpl = templates[sample._segment || routeContact(sample)] || { subject: "", body: "" };
   ui.preview.classList.remove("hidden");
   ui.preview.textContent = "";
@@ -1688,16 +1989,30 @@ function runPreflight() {
   subj.className = "subj";
   subj.textContent = `To ${sample.email} — ${fillTemplate(tpl.subject, sample)}`;
   ui.preview.append(subj, document.createTextNode(fillTemplate(tpl.body, sample)));
+  const foot = document.createElement("span");
+  foot.className = "foot";
+  foot.textContent = renderFooter(sample, "preview0000000", { html: false });
+  ui.preview.append(foot);
 }
 
 // ------------------------------------------------------------------- results
 
+// Only contacts sent a tracked logo can have opened; imported and pre-tracking
+// mail is left out rather than counted as unopened.
+function openStats() {
+  const tracked = Object.values(history).filter((h) => (h.touches || []).some((t) => t.t));
+  const opened = tracked.filter((h) => tracking.byEmail[h.email]?.openedAt).length;
+  return { tracked: tracked.length, opened, rate: tracked.length ? (opened / tracked.length) * 100 : 0 };
+}
+
 function renderStats() {
   const s = historyStats();
+  const o = openStats();
   const due = followUpDue().length;
   const cells = [
     ["", s.contacts, "contacted"],
     ["", s.emails, "emails sent"],
+    ["", o.tracked ? `${o.rate.toFixed(0)}%` : "—", o.tracked ? `${o.opened} of ${o.tracked} opened` : "opens: none sent yet"],
     ["good", `${s.replyRate.toFixed(1)}%`, `${s.replied} replied`],
     [s.bounceRate > 3 ? "bad" : "", `${s.bounceRate.toFixed(1)}%`, `${s.bounced} bounced`],
     ["", due, "follow-ups due"],
@@ -1801,11 +2116,16 @@ async function runScan() {
     });
     ui.scanOut.textContent = "Scanning for bounces…";
     const bounces = await scanForBounces();
+    let opens = null;
+    try { opens = await refreshTracking(); } catch (err) { opens = { ok: false, error: err.message }; }
 
     ui.scanOut.innerHTML =
       `<div class="ok">Scan complete.</div>` +
       `<ul><li>${replies.found} new repl${replies.found === 1 ? "y" : "ies"} across ${replies.scanned} contacts</li>` +
-      `<li>${bounces.found} bounce${bounces.found === 1 ? "" : "s"} detected</li></ul>`;
+      `<li>${bounces.found} bounce${bounces.found === 1 ? "" : "s"} detected</li>` +
+      (opens?.ok ? `<li>${opens.opened} opened · ${opens.unsubscribed} new unsubscribe(s)</li>`
+        : opens?.error ? `<li class="bad">Opens: ${escapeHtml(opens.error)}</li>` : "") +
+      `</ul>`;
     renderStats();
     renderList();
   } catch (err) {
@@ -1815,13 +2135,46 @@ async function runScan() {
   }
 }
 
+// Takes this account's share of the morning's verified leads off the shared
+// queue. The server hands each lead to one person only and stops at the daily
+// limit, so pressing it twice never doubles up.
+async function claimLeads() {
+  const account = detectAccount();
+  if (!account) { ui.claimInfo.textContent = "Can't tell which Gmail account this is — reload Gmail."; return; }
+  const left = remote.dailyLimit - sentToday(account);
+  if (left <= 0) { ui.claimInfo.textContent = `Already sent ${remote.dailyLimit} today from ${account}. Back tomorrow.`; return; }
+
+  ui.claim.disabled = true;
+  ui.claimInfo.textContent = "Getting leads…";
+  const res = await chrome.runtime.sendMessage({ type: "CLAIM_LEADS", account, count: left }).catch((e) => ({ error: e.message }));
+  ui.claim.disabled = false;
+  if (!res || res.error) { ui.claimInfo.textContent = `Couldn't get leads: ${res?.error || "no answer"}`; return; }
+  if (!res.leads.length) {
+    ui.claimInfo.textContent = res.message === "daily limit reached"
+      ? `This account has already taken its ${res.limit} leads today.`
+      : "No verified leads waiting right now. The next batch is picked at 09:30.";
+    return;
+  }
+  allRows = res.leads.map((l) => ({ ...l, email_status: "valid" }));
+  followUpMode = false;
+  ui.csvName.textContent = `Today's leads (${res.leads.length})`;
+  applyFilters();
+  saveState();
+  ui.claimInfo.textContent = `${res.leads.length} leads loaded for ${account} (${res.used} of ${res.limit} claimed today). Check, then Start.`;
+}
+
 // The follow-up queue is built from history, not from the loaded CSV — the
 // whole point is chasing people whose original list you may no longer have open.
 function showFollowUps() {
-  const due = followUpDue();
+  // A follow-up comes from whoever sent the first email, so each salesperson
+  // sees only their own.
+  const me = String(detectAccount() || "").toLowerCase();
+  const due = followUpDue(remote.followUpDays, remote.maxTouches).filter((h) =>
+    String(h.account || h.touches?.[0]?.from || "").toLowerCase() === me);
   ui.scanOut.classList.remove("hidden");
   if (!due.length) {
-    ui.scanOut.innerHTML = `Nothing due. Contacts appear here 3 days after their last email, unless they replied or bounced.`;
+    ui.scanOut.innerHTML = `Nothing due for ${escapeHtml(me || "this account")}. Contacts appear here ` +
+      `${remote.followUpDays} days after their last email from this account, unless they replied, bounced or unsubscribed.`;
     return;
   }
 
@@ -1832,7 +2185,7 @@ function showFollowUps() {
     `<div class="warn">${due.length} contacts due a follow-up.</div>` +
     `<ul><li>${byStage[1] || 0} awaiting a second touch</li>` +
     `<li>${byStage[2] || 0} awaiting a third</li></ul>` +
-    `<div>Loads them as the queue, using the template of whichever segment each was originally sent.</div>`;
+    `<div>Loads them as the queue, using the Follow-up template.</div>`;
 
   const go = document.createElement("button");
   go.className = "btn go";
@@ -1843,7 +2196,7 @@ function showFollowUps() {
     contacts = due.map((h) => ({
       email: h.email, company: h.company, name: h.name,
       vertical: h.vertical, country: h.country, city: h.city,
-      _segment: h.segment, _touch: (h.touches?.length || 1) + 1,
+      segment: "followup", _segment: "followup", _touch: (h.touches?.length || 1) + 1,
     }));
     allRows = contacts;
     ui.rangeFrom.value = "1";
@@ -1852,7 +2205,7 @@ function showFollowUps() {
     ui.rangeRow.classList.remove("hidden");
     ui.list.classList.remove("hidden");
     renderList();
-    ui.scanOut.innerHTML = `<div class="ok">${contacts.length} follow-ups loaded. Edit the template, then Start.</div>`;
+    ui.scanOut.innerHTML = `<div class="ok">${contacts.length} follow-ups loaded with the Follow-up template. Press Start.</div>`;
     ui.status.textContent = "Follow-up queue ready — Start sends in follow-up mode.";
     followUpMode = true;
   });
@@ -1968,6 +2321,22 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
     return;
   }
 
+  // Unsubscribes arrive at the tracker, not in this browser, so fetch them
+  // before sending — someone who opted out yesterday must not get today's email.
+  readMailSettings();
+  try {
+    const r = await refreshTracking();
+    if (r.unsubscribed) addLog(`${r.unsubscribed} new unsubscribe(s) — they will be skipped`, "");
+  } catch (err) {
+    ui.status.textContent = `Could not check for unsubscribes (${err.message}). Check your connection and press Start again.`;
+    return;
+  }
+
+  // Addresses the dashboard's server-side sender has already emailed, synced
+  // by the background worker. Never emailed from here as well, in any mode.
+  const { serverContacted = [] } = await chrome.storage.local.get(["serverContacted"]);
+  const serverSent = new Set((Array.isArray(serverContacted) ? serverContacted : []).map((e) => String(e).toLowerCase()));
+
   ui.resume.classList.add("hidden");
   stopRequested = false;
   setRunning(true);
@@ -1993,15 +2362,19 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
     // suppression check is inverted there: what must never be re-contacted is
     // someone who replied or whose address bounced.
     const record = history[addr];
-    const mustSkip = isFollowUpRun
+    // An unsubscribe is never overridable — not by the skip box, not by a
+    // follow-up run.
+    const mustSkip = record?.unsubscribedAt || serverSent.has(addr) || (isFollowUpRun
       ? Boolean(record?.repliedAt || record?.bouncedAt)
-      : skipSuppressed && suppressed.has(addr);
+      : skipSuppressed && suppressed.has(addr));
 
     if (mustSkip) {
       remaining.shift();
       skipped++;
       markRow(contact, "done");
-      const why = record?.repliedAt ? "already replied"
+      const why = record?.unsubscribedAt ? "unsubscribed"
+        : serverSent.has(addr) ? "already emailed by the dashboard's server sending"
+        : record?.repliedAt ? "already replied"
         : record?.bouncedAt ? `bounced (${record.bounceReason})`
         : "already contacted";
       addLog(`Skipped ${contact.email} — ${why}`, "");
@@ -2011,6 +2384,15 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
 
     const segId = contact._segment || routeContact(contact);
     const tpl = templates[segId] || { subject: "", body: "" };
+    // The daily limit is per account and counts every email, so a run stops
+    // here rather than sending past it.
+    if (sentToday() >= remote.dailyLimit) {
+      addLog(`Daily limit of ${remote.dailyLimit} reached for ${detectAccount()} — the rest wait for tomorrow.`, "err");
+      break;
+    }
+    const token = newToken();
+    const worded = withWording({ ...contact, sender_name: senderName() });
+    const bodyText = fillTemplate(tpl.body, worded);
     ui.status.textContent = `${sent + failed} / ${total} · ${sent} ok, ${failed} failed`;
     markRow(contact, "sending");
 
@@ -2018,8 +2400,10 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
     try {
       result = await composeAndSend({
         to: contact.email,
-        subject: fillTemplate(tpl.subject, contact),
-        body: fillTemplate(tpl.body, contact),
+        subject: fillTemplate(tpl.subject, worded),
+        body: bodyText,
+        html: buildBodyHtml(bodyText, contact, token),
+        token,
         autoSend,
       });
     } catch (err) {
@@ -2036,8 +2420,9 @@ async function startCampaign(queue, { isFollowUpRun = false } = {}) {
       markRow(contact, "done");
       // Record it only once Gmail confirmed, so a failure can be retried.
       await addSuppression([addr]);
-      recordSend(contact, segId, fillTemplate(tpl.subject, contact), { followUp: isFollowUpRun });
+      recordSend(contact, segId, fillTemplate(tpl.subject, contact), { followUp: isFollowUpRun, token });
       await saveHistory();
+      chrome.runtime.sendMessage({ type: "HISTORY_CHANGED" }).catch(() => {});
       const label = (SEGMENTS.find((s) => s.id === segId) || {}).label || segId;
       addLog(`${result.status === "sent" ? "Sent to" : "Draft closed for"} ${contact.email} (${label})`, "ok");
     }
@@ -2075,6 +2460,27 @@ function showResume(remaining) {
 
 // -------------------------------------------------------------- persistence
 
+function loadMailSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["mailSettings"], (d) => {
+      mailSettings = { footer: currentFooter(d.mailSettings?.footer) };
+      resolve(mailSettings);
+    });
+  });
+}
+
+function readMailSettings() {
+  mailSettings = { footer: ui.footer.value };
+}
+
+function showMailSettings() {
+  ui.footer.value = mailSettings.footer;
+}
+
+function saveMailSettings() {
+  return new Promise((r) => chrome.storage.local.set({ mailSettings }, r));
+}
+
 function saveState(remaining) {
   templates[activeSegment] = { subject: ui.subject.value, body: ui.body.value };
   const data = {
@@ -2099,7 +2505,7 @@ function restoreState() {
     [
       "templates", "activeSegment", "subject", "body", "delay", "auto", "includeUnverified",
       "remaining", "keepAwake", "skipSuppressed", "rangeFrom", "rangeTo",
-      "panelWidth", "panelBodyHeight", "suppressed", "history",
+      "panelWidth", "panelBodyHeight", "suppressed", "history", "mailSettings",
     ],
     (d) => {
       suppressed = new Set(Array.isArray(d.suppressed) ? d.suppressed : []);
@@ -2108,7 +2514,8 @@ function restoreState() {
       // segment in a later version doesn't leave it blank for existing users.
       if (d.templates) {
         for (const seg of SEGMENTS) {
-          if (d.templates[seg.id]) templates[seg.id] = d.templates[seg.id];
+          const saved = d.templates[seg.id];
+          if (saved && !PREVIOUS_DEFAULTS.has(templateHash(saved))) templates[seg.id] = saved;
         }
       } else if (d.subject || d.body) {
         // Upgrade path from the single-template version: whatever was in the
@@ -2135,8 +2542,14 @@ function restoreState() {
       if (d.panelBodyHeight) ui.panelBody.style.maxHeight = d.panelBodyHeight;
       if (Array.isArray(d.remaining) && d.remaining.length) showResume(d.remaining);
       history = d.history && typeof d.history === "object" ? d.history : {};
+      mailSettings = { footer: currentFooter(d.mailSettings?.footer) };
+      showMailSettings();
       renderList();
       renderStats();
+      chrome.storage.local.get(["remoteConfig"], (r) => applyRemoteConfig(r.remoteConfig, { force: true }));
+      chrome.runtime.sendMessage({ type: "SYNC_CONFIG" }).catch(() => {});
+      // Pick up opens and unsubscribes that arrived while the panel was closed.
+      refreshTracking().catch(() => {}).finally(renderStats);
     }
   );
 }
@@ -2193,7 +2606,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const replies = await scanForReplies({ days: msg.days || 90 });
         const bounces = await scanForBounces({ days: msg.days || 90 });
-        sendResponse({ ok: true, account, replies: replies.found, bounces: bounces.found });
+        await loadMailSettings();
+        let opened = 0;
+        try { opened = (await refreshTracking()).opened || 0; } catch { /* reported by the dashboard */ }
+        sendResponse({ ok: true, account, replies: replies.found, bounces: bounces.found, opened });
       } catch (err) {
         sendResponse({ ok: false, account, error: err.message || String(err) });
       }
@@ -2210,6 +2626,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   return false;
+});
+
+watchOwnPixels();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.remoteConfig) applyRemoteConfig(changes.remoteConfig.newValue);
 });
 
 // Gmail builds its UI after load; wait for the Compose button before showing up.

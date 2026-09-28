@@ -31,6 +31,11 @@ function renderTiles(c) {
   const bounced = c.filter((x) => x.bouncedAt).length;
   const rate = pct(replied, sent);
   const bRate = pct(bounced, sent);
+  // Only contacts sent a tracked logo can have opened; imported and
+  // pre-tracking mail is left out rather than counted as unopened.
+  const tracked = c.filter((x) => x.tracked);
+  const opened = tracked.filter((x) => x.openedAt).length;
+  const unsub = c.filter((x) => x.unsubscribedAt).length;
 
   // 3-7% is a working cold campaign; under 1% is nearly always deliverability
   // rather than copy, and a bounce rate over 3% is where domains get burned.
@@ -40,8 +45,12 @@ function renderTiles(c) {
   const tiles = [
     { v: fmt(sent), k: "contacts emailed" },
     { v: fmt(emails), k: "emails sent", note: `${(emails / (sent || 1)).toFixed(1)} touches each` },
+    { v: tracked.length ? pct(opened, tracked.length).toFixed(0) + "%" : "—",
+      k: `open rate · ${opened} of ${tracked.length} opened`,
+      note: tracked.length ? "an estimate — see the note at the bottom" : "starts with your next send" },
     { v: rate.toFixed(1) + "%", k: `reply rate · ${replied} replies`, cls: replied ? "good" : "", note: verdict },
     { v: bRate.toFixed(1) + "%", k: `bounced · ${bounced}`, cls: bRate > 3 ? "bad" : "", note: bVerdict },
+    { v: fmt(unsub), k: "unsubscribed", note: unsub ? "never emailed again" : "" },
   ];
   $("tiles").innerHTML = tiles.map((t) => `
     <div class="tile ${t.cls || ""}">
@@ -54,18 +63,19 @@ function renderTiles(c) {
 // Grouped bars rather than stacked: sends and replies are different events, and
 // stacking them would imply a total that means nothing.
 function renderTimeline(c) {
-  const sends = {}, replies = {};
+  const sends = {}, replies = {}, opens = {};
   for (const x of c) {
     for (const t of x.touches || [{ at: x.firstSentAt }]) {
       const k = dayKey(t.at); sends[k] = (sends[k] || 0) + 1;
     }
     if (x.repliedAt) { const k = dayKey(x.repliedAt); replies[k] = (replies[k] || 0) + 1; }
+    if (x.openedAt) { const k = dayKey(x.openedAt); opens[k] = (opens[k] || 0) + 1; }
   }
-  const days = [...new Set([...Object.keys(sends), ...Object.keys(replies)])].sort().slice(-30);
+  const days = [...new Set([...Object.keys(sends), ...Object.keys(replies), ...Object.keys(opens)])].sort().slice(-30);
   if (!days.length) { $("timeline").innerHTML = `<p class="cap">No activity yet.</p>`; return; }
 
   const W = 900, H = 210, PL = 38, PR = 10, PT = 12, PB = 26;
-  const max = Math.max(1, ...days.map((d) => Math.max(sends[d] || 0, replies[d] || 0)));
+  const max = Math.max(1, ...days.map((d) => Math.max(sends[d] || 0, replies[d] || 0, opens[d] || 0)));
   const bw = (W - PL - PR) / days.length;
   const y = (v) => PT + (H - PT - PB) * (1 - v / max);
 
@@ -79,23 +89,72 @@ function renderTimeline(c) {
   let bars = "";
   days.forEach((d, i) => {
     const x0 = PL + i * bw;
-    const s = sends[d] || 0, r = replies[d] || 0;
+    const s = sends[d] || 0, o = opens[d] || 0, r = replies[d] || 0;
+    const tip = `<b>${d}</b><br>${s} sent<br>${o} opened<br>${r} replied`;
     // 2px gap between adjacent fills, 4px rounded ends anchored to the baseline.
-    const w = Math.max(2, bw / 2 - 2);
-    if (s) bars += `<rect x="${x0 + 1}" y="${y(s)}" width="${w}" height="${H - PB - y(s)}" rx="3" fill="var(--s1)"
-       data-tip="<b>${d}</b><br>${s} sent${r ? `<br>${r} replied` : ""}"/>`;
-    if (r) bars += `<rect x="${x0 + w + 3}" y="${y(r)}" width="${w}" height="${H - PB - y(r)}" rx="3" fill="var(--good)"
-       data-tip="<b>${d}</b><br>${r} replied"/>`;
+    const w = Math.max(2, bw / 3 - 2);
+    if (s) bars += `<rect x="${x0 + 1}" y="${y(s)}" width="${w}" height="${H - PB - y(s)}" rx="3" fill="var(--s1)" data-tip="${tip}"/>`;
+    if (o) bars += `<rect x="${x0 + w + 3}" y="${y(o)}" width="${w}" height="${H - PB - y(o)}" rx="3" fill="var(--s2)" data-tip="${tip}"/>`;
+    if (r) bars += `<rect x="${x0 + 2 * w + 5}" y="${y(r)}" width="${w}" height="${H - PB - y(r)}" rx="3" fill="var(--good)" data-tip="${tip}"/>`;
     if (i === 0 || i === days.length - 1 || i === Math.floor(days.length / 2)) {
       bars += `<text class="axis" x="${x0 + bw / 2}" y="${H - 8}" text-anchor="middle">${d.slice(5)}</text>`;
     }
   });
 
   $("timeline").innerHTML =
-    `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Emails sent and replies by day">
+    `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Emails sent, opened and replied to, by day">
       ${g}<line class="grid-line" x1="${PL}" x2="${W - PR}" y1="${H - PB}" y2="${H - PB}"/>${bars}
     </svg>`;
   wireTips($("timeline"));
+}
+
+// Open rate per template, over tracked contacts only. Same small-sample rule
+// as reply rate: a template sent to four people can't have an open rate yet.
+function renderOpensBySegment(c) {
+  const rows = Object.keys(SEG_LABEL).map((id) => {
+    const list = c.filter((x) => x.segment === id && x.tracked);
+    const opened = list.filter((x) => x.openedAt).length;
+    const rate = pct(opened, list.length);
+    const thin = list.length < MIN_N;
+    return {
+      id, label: SEG_LABEL[id], value: rate, sent: list.length, opened, thin,
+      display: thin ? `${opened}/${list.length}` : rate.toFixed(0) + "%",
+      tip: `<b>${SEG_LABEL[id]}</b><br>${list.length} sent with tracking<br>${opened} opened` +
+        (thin ? `<br><i>too few to read a rate from</i>` : `<br>${rate.toFixed(0)}% open rate`),
+    };
+  }).filter((r) => r.sent > 0).sort((a, b) => b.sent - a.sent);
+
+  hbars($("opensBySegment"), rows, {
+    colorFor: (r) => (r.thin ? "var(--text-3)" : SEG_COLOR[r.id]),
+    sublabel: (r) => (r.thin ? `${r.sent} sent — too few to judge` : `${r.opened} of ${r.sent} opened`),
+  });
+}
+
+const VIA_LABEL = { gmail: "Gmail", outlook: "Outlook", yahoo: "Yahoo", other: "other mail app" };
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+
+// Who opened most recently. Someone who opened more than once and hasn't
+// replied is the warmest lead on the list, so they're flagged.
+function renderRecentOpens(c) {
+  const list = c.filter((x) => x.lastOpenAt).sort((a, b) => b.lastOpenAt - a.lastOpenAt).slice(0, 12);
+  const hot = c.filter((x) => x.opens >= 2 && !x.repliedAt && !x.unsubscribedAt).length;
+  $("hotCount").textContent = hot
+    ? `${hot} opened more than once without replying — worth a follow-up.`
+    : "";
+  if (!list.length) {
+    $("recentOpens").innerHTML = `<p class="cap" style="margin:0">No opens yet. They appear here within ten
+      minutes of someone opening an email sent with the logo.</p>`;
+    return;
+  }
+  $("recentOpens").innerHTML = `<table>${list.map((x) => {
+    const warm = x.opens >= 2 && !x.repliedAt && !x.unsubscribedAt;
+    return `<tr>
+      <td class="wrap"><b>${esc(x.company || x.email)}</b><br><span class="sub">${esc(x.email)}</span></td>
+      <td>${timeAgo(x.lastOpenAt)}<br><span class="sub">${x.opens} open${x.opens === 1 ? "" : "s"} · ${VIA_LABEL[x.via] || "—"}</span></td>
+      <td>${x.repliedAt ? `<span class="pill replied">replied</span>`
+        : warm ? `<span class="pill opened">follow up</span>` : ""}</td>
+    </tr>`;
+  }).join("")}</table>`;
 }
 
 // Horizontal bars with the value written on each — the light-mode aqua slot is
@@ -155,16 +214,19 @@ function renderVerticals(c) {
   const by = {};
   for (const x of c) {
     const k = x.vertical || "unspecified";
-    by[k] = by[k] || { sent: 0, replied: 0 };
+    by[k] = by[k] || { sent: 0, replied: 0, tracked: 0, opened: 0 };
     by[k].sent++;
     if (x.repliedAt) by[k].replied++;
+    if (x.tracked) by[k].tracked++;
+    if (x.openedAt) by[k].opened++;
   }
   const rows = Object.entries(by)
     .sort((a, b) => b[1].sent - a[1].sent).slice(0, 10)
     .map(([k, v]) => ({
       label: k.length > 22 ? k.slice(0, 21) + "…" : k,
       value: v.sent, display: fmt(v.sent),
-      tip: `<b>${k}</b><br>${v.sent} contacted<br>${v.replied} replied (${pct(v.replied, v.sent).toFixed(1)}%)`,
+      tip: `<b>${k}</b><br>${v.sent} contacted<br>${v.replied} replied (${pct(v.replied, v.sent).toFixed(1)}%)` +
+        (v.tracked ? `<br>${v.opened} of ${v.tracked} opened (${pct(v.opened, v.tracked).toFixed(0)}%)` : ""),
       replied: v.replied, sent: v.sent,
     }));
   hbars($("byVertical"), rows, {
@@ -180,7 +242,9 @@ function renderAccounts(c) {
   const by = {};
   for (const x of c) {
     const k = x.account || "(unrecorded)";
-    by[k] = by[k] || { sent: 0, replied: 0, bounced: 0, emails: 0 };
+    by[k] = by[k] || { sent: 0, replied: 0, bounced: 0, emails: 0, tracked: 0, opened: 0 };
+    if (x.tracked) by[k].tracked++;
+    if (x.openedAt) by[k].opened++;
     by[k].sent++;
     by[k].emails += x.touches?.length || 1;
     if (x.repliedAt) by[k].replied++;
@@ -196,7 +260,7 @@ function renderAccounts(c) {
 
   $("byAccount").innerHTML =
     `<thead><tr><th>Sending address</th><th>Contacts</th><th>Emails</th>
-      <th>Reply rate</th><th>Bounce rate</th><th>Read</th></tr></thead><tbody>` +
+      <th>Open rate</th><th>Reply rate</th><th>Bounce rate</th><th>Read</th></tr></thead><tbody>` +
     rows.map(([k, v]) => {
       const r = pct(v.replied, v.sent), b = pct(v.bounced, v.sent);
       const thin = v.sent < MIN_N;
@@ -208,6 +272,7 @@ function renderAccounts(c) {
         <td>${k}</td>
         <td>${fmt(v.sent)}</td>
         <td>${fmt(v.emails)}</td>
+        <td>${!v.tracked ? "—" : v.tracked < MIN_N ? `${v.opened}/${v.tracked}` : pct(v.opened, v.tracked).toFixed(0) + "%"}</td>
         <td>${thin ? `${v.replied}/${v.sent}` : r.toFixed(1) + "%"}</td>
         <td style="color:${b > 3 ? "var(--critical)" : "inherit"}">${thin ? `${v.bounced}/${v.sent}` : b.toFixed(1) + "%"}</td>
         <td>${verdict}</td>
@@ -257,7 +322,8 @@ function renderTable(c) {
   const cols = [
     ["company", "Company"], ["email", "Email"], ["segment", "Template"],
     ["vertical", "Industry"], ["country", "Country"],
-    ["touches", "Touches"], ["lastSentAt", "Last sent"], ["status", "Status"],
+    ["touches", "Touches"], ["lastSentAt", "Last sent"], ["opens", "Opens"],
+    ["lastOpenAt", "Last opened"], ["status", "Status"],
   ];
 
   $("table").innerHTML =
@@ -265,6 +331,8 @@ function renderTable(c) {
      <tbody>${rows.slice(0, 400).map((x) => {
        const status = x.repliedAt ? `<span class="pill replied">replied</span>`
          : x.bouncedAt ? `<span class="pill bounced">${x.bounceReason || "bounced"}</span>`
+         : x.unsubscribedAt ? `<span class="pill bounced">unsubscribed</span>`
+         : x.openedAt ? `<span class="pill opened" title="${x.opens || 1} open(s), first ${new Date(x.openedAt).toLocaleString()}">opened</span>`
          : `<span class="pill">sent</span>`;
        return `<tr>
          <td class="wrap">${x.company || "—"}</td>
@@ -274,6 +342,8 @@ function renderTable(c) {
          <td>${x.country || "—"}</td>
          <td>${x.touches?.length || 1}</td>
          <td>${x.lastSentAt ? dayKey(x.lastSentAt) : "—"}</td>
+         <td>${x.tracked ? x.opens || 0 : "—"}</td>
+         <td>${x.lastOpenAt ? timeAgo(x.lastOpenAt) : "—"}</td>
          <td>${status}</td>
        </tr>`;
      }).join("")}</tbody>`;
@@ -305,8 +375,8 @@ function render(data) {
   $("meta").textContent = data.live
     ? `${data.account || ""} · live`
     : `${data.account || ""} · snapshot from ${(data.exportedAt || "").slice(0, 10)}`;
-  renderTiles(c); renderTimeline(c); renderSegments(c); renderAccounts(c);
-  renderVerticals(c); renderHealth(c); renderTable(c);
+  renderTiles(c); renderTimeline(c); renderOpensBySegment(c); renderRecentOpens(c);
+  renderSegments(c); renderAccounts(c); renderVerticals(c); renderHealth(c); renderTable(c);
 }
 
 // ------------------------------------------------------------------ loading
@@ -340,15 +410,22 @@ async function seedFromBundle() {
 }
 
 function fromStorage() {
-  chrome.storage.local.get(["history", "lastSyncAt"], async (d) => {
+  chrome.storage.local.get(["history", "lastSyncAt", "tracking"], async (d) => {
     const own = d.history || {};
+    const opens = d.tracking?.byEmail || {};
+    lastTrackingSync = d.tracking?.syncedAt || 0;
     const bundled = await seedFromBundle();
     // Merged, not replaced: a shared snapshot must not erase what this
     // installation has collected since, and vice versa.
     const merged = { ...bundled, ...own };
     lastSync = d.lastSyncAt || 0;
 
-    const contacts = Object.values(merged);
+    // Opens live in their own key, written by the background worker; attach them
+    // to each contact here.
+    const contacts = Object.values(merged).map((x) => {
+      const o = opens[x.email];
+      return o ? { ...x, ...o, tracked: true, unsubscribedAt: x.unsubscribedAt || o.unsubscribedAt } : x;
+    });
     document.getElementById("readout").textContent =
       `${contacts.length} contacts in view — ${Object.keys(own).length} from this browser, ` +
       `${Object.keys(bundled).length} from the bundled snapshot`;
@@ -369,6 +446,7 @@ function fromStorage() {
 }
 
 let lastSync = 0;
+let lastTrackingSync = 0;
 let syncing = false;
 
 function renderSyncBar() {
@@ -377,9 +455,10 @@ function renderSyncBar() {
   bar.classList.remove("hidden");
   bar.innerHTML = syncing
     ? `<span class="spin"></span> Reading your mailboxes — this opens each signed-in Gmail account briefly.`
-    : lastSync
+    : (lastSync
       ? `Last read from Gmail ${timeAgo(lastSync)}. <button class="ghost" id="resync">Refresh</button>`
-      : `<button class="ghost" id="resync">Read my mailboxes</button>`;
+      : `<button class="ghost" id="resync">Read my mailboxes</button>`) +
+      (lastTrackingSync ? ` <span class="sub">· opens updated ${timeAgo(lastTrackingSync)}, automatically every 10 min</span>` : "");
   const btn = document.getElementById("resync");
   if (btn) btn.addEventListener("click", () => sync());
 
@@ -460,8 +539,12 @@ chrome.storage.local.get(["history", "lastSyncAt"], (d) => {
 // storage update, which is exactly how an import that saved 200 contacts could
 // leave the dashboard sitting empty.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.history) fromStorage();
+  if (area === "local" && (changes.history || changes.tracking)) fromStorage();
 });
+
+// Fresh opens every time the dashboard is opened, on top of the background
+// worker's 10-minute schedule.
+chrome.runtime.sendMessage({ type: "SYNC_TRACKING" }, () => void chrome.runtime.lastError);
 
 // Storage events do not fire in a tab that was already open when another tab
 // wrote, in every Chrome build. A slow poll costs nothing and closes that gap.

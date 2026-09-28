@@ -129,6 +129,47 @@ contact table.
 **Export** is only for publishing a copy somewhere else, such as the Vercel version in
 `../leads/dashboard/`. You never need it to see your own numbers.
 
+## Footer, unsubscribe and open tracking
+
+Every email ends with a footer in small grey text. At the top is the blue
+Zemenay logo, followed by who sent the email, a postal address, and an
+unsubscribe link. Anti-spam law (CAN-SPAM, CASL, GDPR/PECR) requires these
+things, and filters look for them. You can edit the footer's wording in the
+panel. `{{unsubscribe}}` becomes the link, and CSV columns such as
+`{{company}}` work too. **Check** validates the footer's columns the same way
+it validates the subject and body.
+
+**The logo is the open tracker.** Each email's logo URL carries a random code
+unique to that email. When the recipient's mail app loads the logo, the
+[tracker](server/README.md) at `mailer-tracker.vercel.app` records an open.
+There's no hidden pixel, and the recipient's address never appears in a URL.
+None of this needs setting up: the tracker is built in.
+
+- Opens are pulled automatically every 10 minutes, and whenever the panel or
+  dashboard opens.
+- Your own views don't count. In this browser, the extension swaps in an
+  untracked copy of the logo, so writing or reviewing an email isn't an open.
+  It also notes when you view your own copy in Sent and discounts it.
+- Unsubscribes are pulled before every run and added to the do-not-email list.
+  An unsubscribed contact is never emailed again, even with the skip box
+  unticked or in a follow-up run. A run won't start if the tracker can't be
+  reached, because someone who opted out yesterday must not get today's email.
+
+On the **dashboard**, opens have their own section:
+- an open-rate tile
+- first opens per day on the activity chart
+- open rate by offer and by sending address
+- a **Recently opened** feed that flags anyone who opened more than once
+  without replying, since that's the warmest follow-up on the list
+- Opens and Last-opened columns in the contacts table
+
+The open rate counts only contacts who were sent a tracked logo, so imported
+mail doesn't drag it down.
+
+Open counts are estimates. Apple Mail over-counts them and image-blocking
+clients under-count them; [`server/README.md`](server/README.md) explains why.
+When you test, open the email on your phone or in a different mail app.
+
 ## Nobody gets emailed twice
 
 Every address that Gmail confirms is recorded permanently. On any future run — different CSV,
@@ -175,6 +216,23 @@ Chrome throttles timers in tabs you aren't looking at, down to roughly once a mi
 **Keep full speed in a background tab** (checkbox, on by default) plays a 40Hz tone at 0.001 gain for the duration of a run. Chrome exempts tabs that are playing audio from throttling, so pacing stays at whatever delay you set. Measured on a hidden tab, a 100ms timer took 1005ms with no audio and 108ms with the tone. Audibility is what Chrome keys on, not merely holding an audio context: a gain of 0.0001 made no difference at all, while 0.001 lifted the throttling completely.
 
 At that level and frequency the tone is inaudible in normal use, but the tab does show the usual speaker icon while sending, which doubles as a signal that a run is still going. Muting the tab in Chrome defeats the exemption and puts throttling back. Turn the checkbox off if you would rather have no audio and accept slower pacing.
+
+## Server-side sending from the dashboard
+
+The dashboard at `mailer-tracker.vercel.app` can also send by itself, from the
+four Gmail accounts over SMTP with app passwords, on a randomized weekday
+schedule (each account starts at a random time between 09:00 and 11:30 EAT,
+then 3–8 minute gaps, 15 a day per account by default). It renders exactly
+what this extension renders: same routing, templates, placeholders, footer,
+tracked logo and unsubscribe link. It is **paused until you unpause it** on
+the dashboard. Setup, env vars and the trigger are in
+[`server/README.md`](server/README.md#server-side-sending).
+
+The two never email the same person: on every sync this extension uploads the
+addresses in its history and do-not-email list to the dashboard, and
+downloads the addresses the dashboard has emailed, which the send loop then
+skips in every mode ("already emailed by the dashboard's server sending").
+Templates edited on the dashboard reach both.
 
 ## Limits and notes
 
