@@ -53,6 +53,7 @@ const LANE_DEFAULTS = {
     template: 'auto', followupTemplate: 'followup', custom: { subject: '', body: '' }, followupCustom: { subject: '', body: '' } },
 };
 export const FIRST_TEMPLATE_CHOICES = ['auto', ...TEMPLATE_IDS.filter((t) => t !== 'followup'), 'custom'];
+export const CATEGORY_IDS = TEMPLATE_IDS.filter((t) => t !== 'followup');
 export const FOLLOWUP_TEMPLATE_CHOICES = ['followup', 'custom'];
 
 export const DEFAULT_SETTINGS = {
@@ -72,6 +73,13 @@ export const DEFAULT_SETTINGS = {
   skipRoleAddresses: true,
   freemailDomainExempt: true,
   blockOnPlaceholderIssues: true,
+  // Use a contact's own subject_line / opening_line from the CSV. Off: every
+  // first email is the dashboard template for the contact's category.
+  personalLines: false,
+  // Categories (first-email templates) that get no emails: their contacts wait
+  // in the queue, and contacts already emailed with them get no follow-up,
+  // until the category is switched back on.
+  skipTemplates: ['va'],
   // Who "Send test batch now" may email. Only queued contacts on this list are
   // ever touched by that button; it bypasses the pause and window for them only.
   testRecipients: ['michaelgetu21@gmail.com', 'michaelgetu07@gmail.com', 'mickgetu@gmail.com'],
@@ -179,6 +187,10 @@ export function cleanSettings(input = {}, prev = DEFAULT_SETTINGS) {
     skipRoleAddresses: bool(input.skipRoleAddresses, p.skipRoleAddresses),
     freemailDomainExempt: bool(input.freemailDomainExempt, p.freemailDomainExempt),
     blockOnPlaceholderIssues: bool(input.blockOnPlaceholderIssues, p.blockOnPlaceholderIssues),
+    personalLines: bool(input.personalLines, p.personalLines),
+    skipTemplates: Array.isArray(input.skipTemplates)
+      ? [...new Set(input.skipTemplates.filter((t) => CATEGORY_IDS.includes(t)))]
+      : p.skipTemplates,
     testRecipients: cleanRecipients(input.testRecipients, p.testRecipients),
     lanes: cleanLanes(input.lanes, p.lanes),
     accountLanes: cleanAccountLanes(input.accountLanes, p.accountLanes),

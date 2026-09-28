@@ -78,6 +78,9 @@ const clockOf = (ms) => S.eatClock(ms);
 async function reset() {
   await shim.flush();
   sim.sent = []; sim.behaviour = {};
+  // Every category on, so the sections below count sends as they always have;
+  // the "categories switched off" section covers the default (Virtual assistants off).
+  await command('SET', S.K.settings, JSON.stringify({ ...S.DEFAULT_SETTINGS, skipTemplates: [] }));
 }
 async function saveSettings(patch) {
   const r = await admin('settings.save', { settings: patch });
@@ -675,7 +678,7 @@ section('Send test batch now (flow.testNow): allowlist only, bypasses pause/wind
   check('test recipients default to the three inboxes, and sending starts paused', JSON.stringify(st0.testRecipients) === JSON.stringify(ALLOW) && st0.paused === true);
   const saved = (await admin('settings.save', { settings: { testRecipients: ' MickGetu@gmail.com\nnot-an-email, michaelgetu21@gmail.com;mickgetu@gmail.com ' } })).json.settings;
   check('test recipients are cleaned on save (lowercase, valid, de-duplicated)', JSON.stringify(saved.testRecipients) === JSON.stringify(['mickgetu@gmail.com', 'michaelgetu21@gmail.com']) && saved.paused === true);
-  await admin('settings.save', { settings: { testRecipients: ALLOW, weekdays: [] } });   // no sending day at all: the window can never be open
+  await admin('settings.save', { settings: { testRecipients: ALLOW, weekdays: [], skipTemplates: [] } });   // no sending day at all: the window can never be open
   const csv = ['email,first_name,company,segment,hours_gap,email_status',
     `${REAL[0]},Rae,Real Co,tech,,valid`, `${ALLOW[0]},Michael,[TEST] Sample Dev Studio,tech,,valid`, `${REAL[1]},Rob,Real Dental,callcenter,closed weekends,valid`,
     `${ALLOW[1]},Michael,[TEST] Sample Dental Ltd,va,,valid`, `${ALLOW[2]},Michael,[TEST] Sample Clinic,callcenter-generic,closed on weekends,valid`,
@@ -763,8 +766,7 @@ section('Send test batch now (flow.testNow): allowlist only, bypasses pause/wind
 // ============================================================ test follow-up
 section('Send test follow-up now (flow.testFollowUp): next touch now, allowlist only, real stop rules');
 {
-  await shim.flush();
-  sim.sent = []; sim.behaviour = {};
+  await reset();
   const ALLOW = ['michaelgetu21@gmail.com', 'michaelgetu07@gmail.com', 'mickgetu@gmail.com'];
   const REAL = 'real.person@realco.example';
   let imapReplies = [], imapFail = new Set();
@@ -939,7 +941,7 @@ await reset();
     ...Array.from({ length: n }, (_, i) => `${prefix}lead${i}.jones@${prefix}firm${i}.example,${prefix.toUpperCase()} Firm ${i},Lee${i},Jones,dental,closed weekends,valid`), extra].filter(Boolean).join('\n');
 
   // --- migration: settings and contacts saved before lanes existed
-  const oldSettings = { ...S.DEFAULT_SETTINGS, perAccountCap: 5 };
+  const oldSettings = { ...S.DEFAULT_SETTINGS, perAccountCap: 5, skipTemplates: [] };   // every category on, as in reset()
   delete oldSettings.lanes; delete oldSettings.accountLanes;
   await command('SET', S.K.settings, JSON.stringify(oldSettings));
   await command('HSET', S.K.contacts, 'old.contact@legacy.example', JSON.stringify({ email: 'old.contact@legacy.example', row: { email: 'old.contact@legacy.example', company: 'Legacy', vertical: 'dental', hours_gap: 'closed weekends' }, template: 'callcenter', addedAt: 1, status: 'queued' }));
@@ -1403,6 +1405,7 @@ section('Per-contact subject_line / opening_line, and re-uploads that update que
 await reset();
 {
   E.setRandom(mulberry(91));
+  await saveSettings({ personalLines: true });
   const HEAD = 'email,company,first_name,last_name,vertical,hours_gap,email_status';
   const base = [
     'ana.one@pcone.example,PC One,Ana,One,software agency,closed weekends,valid',
@@ -1459,6 +1462,7 @@ section('Personal lines in the queue, the plan and a per-contact preview; person
 await reset();
 {
   E.setRandom(mulberry(93));
+  await saveSettings({ personalLines: true });
   const HEAD = 'email,company,first_name,last_name,vertical,hours_gap,email_status,subject_line,opening_line';
   const rowsCsv = [
     'pa.one@pzone.example,PZ One,Pa,One,dental,closed weekends,valid,"Pa, 40 years of PZ One",Loved the story on your About page.',
@@ -1523,6 +1527,100 @@ await reset();
     P.standardSamePeriod.contacts === [rc, rd].filter((x) => x.touches[0].at >= P.since).length, JSON.stringify(P.standardSamePeriod));
   const rl = (await admin('replies.list')).json.items;
   check('replies say whether the email they answered was personalised', rl.find((x) => x.email === 'pa.one@pzone.example')?.personal === true);
+  await saveSettings({ paused: true });
+}
+
+// ============================================================ personal lines off (the default)
+section('The CSV\'s own subject/opening lines are off by default: first emails use the category template');
+await reset();
+{
+  E.setRandom(mulberry(95));
+  check('personal lines are off by default', (await S.readSettings()).personalLines === false);
+  const NAMES = { [ACCOUNTS[0]]: 'Daniel', [ACCOUNTS[1]]: 'Brook', [ACCOUNTS[2]]: 'Berry', [ACCOUNTS[3]]: 'Noah' };
+  await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' }, body: { senders: NAMES } });
+  const HEAD = 'email,company,first_name,last_name,vertical,hours_gap,email_status,subject_line,opening_line';
+  await admin('contacts.upload', { csv: `${HEAD}\npo.one@poone.example,PO One,Po,One,dental,closed weekends,valid,"Po, a special subject",A special opener.` });
+  const TPL_SUBJECT = "who's answering when PO One is closed weekends?";
+  const q = (await admin('queue.list')).json;
+  check('switch off: the queue counts nobody as personalised and shows no personal lines', q.personal === 0 && q.standard === 1 && q.personalLinesOn === false
+    && q.items[0].subjectLine === '' && q.items[0].openingLine === '', JSON.stringify(q).slice(0, 300));
+  const pv = (await admin('contact.preview', { email: 'po.one@poone.example' })).json;
+  check('switch off: the preview is the category template', !pv.personal && pv.templateId === 'callcenter' && pv.subject === TPL_SUBJECT
+    && !pv.text.includes('special opener') && pv.text.includes(`\n${NAMES[pv.account]}\nZemenay`), JSON.stringify(pv).slice(0, 300));
+  await saveSettings({ personalLines: true });
+  const on = (await admin('contact.preview', { email: 'po.one@poone.example' })).json;
+  check('switch on: the same contact previews with its own lines again', on.subject === 'Po, a special subject' && on.text.includes('A special opener.'));
+  await saveSettings({ personalLines: false });
+
+  await saveSettings({ paused: false, perAccountCap: 2 });
+  const d = '2026-11-09';
+  for (let t = EAT(d, '08:55'); t <= EAT(d, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const sent = sim.sent.find((m) => m.to === 'po.one@poone.example');
+  check('switch off: the send uses the category template with no opener, from and signed by the account\'s own name',
+    sent?.subject === TPL_SUBJECT && !/special opener/.test(sent?.mail.text || '') && sent?.mail.from?.name === NAMES[sent?.account]
+    && sent?.mail.text.includes(`\n${NAMES[sent?.account]}\nZemenay`), `${JSON.stringify(sent?.mail.from)} ${sent?.subject}`);
+  const rec = JSON.parse(await command('HGET', S.K.sent, 'po.one@poone.example'));
+  const stored = JSON.parse(await command('HGET', S.K.contacts, 'po.one@poone.example'));
+  check('switch off: the send is not marked personalised; the stored row keeps its lines', !rec.touches[0].personal && stored.row.subject_line === 'Po, a special subject');
+  await saveSettings({ paused: true });
+
+  // Sender names: the From name is the name alone, even when saved with the company.
+  check('fromHeader: the name alone, the company cut off; no name, just the address',
+    JSON.stringify(E.fromHeader('Berry @ ZemenayTech', 'b@x.example')) === JSON.stringify({ name: 'Berry', address: 'b@x.example' })
+    && E.fromHeader('Berry at ZemenayTech', 'b@x.example').name === 'Berry' && E.fromHeader('Noah', 'n@x.example').name === 'Noah'
+    && E.fromHeader('', 'b@x.example') === 'b@x.example' && E.fromHeader('  ', 'b@x.example') === 'b@x.example');
+  await call(handlers.config, { method: 'PUT', headers: { 'x-admin-password': 'admin-test-pw' }, body: { senders: { ...NAMES, [ACCOUNTS[2]]: 'Berry @ ZemenayTech' } } });
+  const n0 = sim.sent.length;
+  const ts = await admin('test.send', { account: ACCOUNTS[2], to: 'michaelgetu21@gmail.com', templateId: 'callcenter' });
+  const tm = sim.sent[n0];
+  check('a name saved as "Berry @ ZemenayTech" sends from "Berry" and signs off "Berry"', ts.status === 200 && tm?.mail.from?.name === 'Berry'
+    && /^From: Berry <berryydaniel@gmail\.com>$/m.test(tm?.raw || '') && tm?.mail.text.includes('\nBerry\nZemenay'), `${JSON.stringify(tm?.mail.from)} ${ts.raw}`);
+}
+
+// ============================================================ categories switched off (Virtual assistants by default)
+section('Categories switched off: Virtual assistants gets no emails by default; switching it back on resumes');
+{
+  await shim.flush();                         // no saved settings: the defaults
+  sim.sent = []; sim.behaviour = {};
+  E.setRandom(mulberry(97));
+  check('Virtual assistants is switched off by default', JSON.stringify((await S.readSettings()).skipTemplates) === '["va"]');
+  const HEAD = 'email,company,first_name,vertical,hours_gap,email_status';
+  await admin('contacts.upload', { csv: [HEAD, 'va.one@vaone.example,VA One,Vi,accounting,,valid', 'cc.one@ccone.example,CC One,Cy,dental,closed weekends,valid',
+    'va.two@vatwo.example,VA Two,Vo,hotel,,valid', 'cc.two@cctwo.example,CC Two,Ce,dental,closed weekends,valid'].join('\n') });
+  // someone already emailed with the Virtual assistants template, due a follow-up
+  const FU = 'va.old@vaold.example', old = EAT('2026-10-01', '10:00');
+  await command('HSET', S.K.sent, FU, JSON.stringify({ email: FU, account: ACCOUNTS[0], company: 'VA Old', touches: [{ at: old, n: 1, t: 'vaoldtoken000001', template: 'va' }], firstSentAt: old, lastSentAt: old }));
+  await command('ZADD', S.K.fu, old, FU);
+  const q = (await admin('queue.list')).json;
+  check('the queue marks Virtual assistants contacts as not sent', q.items.filter((x) => x.off).map((x) => x.email).join() === 'va.one@vaone.example,va.two@vatwo.example'
+    && q.items[0].off === 'Virtual assistants emails are switched off' && !q.items[1].off, JSON.stringify(q.items));
+  await saveSettings({ testRecipients: ['va.two@vatwo.example', 'cc.two@cctwo.example'] });
+  const tb = (await admin('flow.testNow')).json;
+  check('the test batch leaves the Virtual assistants contact out, with the reason', tb.assign.map((x) => x.email).join() === 'cc.two@cctwo.example'
+    && tb.suppressed.find((x) => x.email === 'va.two@vatwo.example')?.reason === 'Virtual assistants emails are switched off', JSON.stringify(tb).slice(0, 400));
+
+  await saveSettings({ paused: false, perAccountCap: 3 });
+  const d = '2026-11-16';
+  const plan = await E.ensurePlan(d, { now: EAT('2026-11-15', '20:00') });
+  check('the plan takes only the other categories, and no follow-up to a Virtual assistants email', plan.items.map((i) => i.email).sort().join() === 'cc.one@ccone.example,cc.two@cctwo.example',
+    plan.items.map((i) => i.email).join());
+  check('the Virtual assistants contacts wait at the front of the queue, in order; the follow-up stays in rotation',
+    (await command('LRANGE', S.K.queue, 0, -1)).join() === 'va.one@vaone.example,va.two@vatwo.example' && Number(await command('ZSCORE', S.K.fu, FU)) === old);
+  for (let t = EAT(d, '08:55'); t <= EAT(d, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  check('the day sends to the other categories only', sim.sent.map((m) => m.to).sort().join() === 'cc.one@ccone.example,cc.two@cctwo.example', sim.sent.map((m) => m.to).join());
+
+  await saveSettings({ skipTemplates: [] });
+  const next = await E.ensurePlan('2026-11-17', { now: EAT(d, '20:00') });
+  check('switched back on: the waiting contacts and the follow-up are planned', ['va.one@vaone.example', 'va.two@vatwo.example', FU].every((e) => next.items.some((i) => i.email === e)),
+    next.items.map((i) => i.email).join());
+
+  // A Virtual assistants email planned before the switch went off is held back at send time.
+  await saveSettings({ skipTemplates: ['va'] });
+  const n0 = sim.sent.length;
+  const late = await E.sendItem({ id: '2026-11-18:late:va', date: '2026-11-18', account: ACCOUNTS[0], email: 'va.one@vaone.example', template: 'va', followUp: false, touch: 1,
+    at: EAT('2026-11-18', '10:00'), status: 'planned' }, { now: EAT('2026-11-18', '10:00'), today: '2026-11-18' });
+  check('a planned Virtual assistants email is deferred at send time, nothing sent', late.status === 'deferred' && late.reason === 'Virtual assistants emails are switched off' && sim.sent.length === n0,
+    JSON.stringify(late));
   await saveSettings({ paused: true });
 }
 

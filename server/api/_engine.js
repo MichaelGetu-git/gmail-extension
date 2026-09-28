@@ -17,7 +17,7 @@ import {
   LANES, LANE_LABEL, laneOf, laneOpts, laneCap, contactLane, normLane,
 } from './_settings.js';
 import { readConfig } from './config.js';
-import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, withWording, problems, personalise } from './_render.js';
+import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, withWording, problems, personalise, signOffName, SEGMENTS } from './_render.js';
 import { checkMany, checkOne, syncUnsubscribes } from './_suppress.js';
 import { transportFor, classifySmtpError } from './_smtp.js';
 import { scanInbox, msgIds } from './_imap.js';
@@ -29,6 +29,12 @@ const FINAL = new Set(['sent', 'failed', 'bounced', 'skipped']);
 const parse = (s, d = null) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
 export const accountsOf = (config) => Object.keys(config.senders || {});
+// The From header: the account's name alone ("Berry"), even when it was saved
+// with the company ("Berry @ ZemenayTech"); just the address when no name is set.
+export function fromHeader(name, account) {
+  const n = signOffName(name);
+  return n ? { name: n, address: account } : account;
+}
 // The accounts that send for one lane (Regular = every account not assigned
 // to Work or Hot). Never falls back: an empty list means the lane sends nothing.
 export const laneAccounts = (config, settings, lane) => accountsOf(config).filter((a) => laneOf(settings, a) === normLane(lane));
@@ -279,7 +285,8 @@ export async function uploadContacts(csv, { includeUnverified = false, now = Dat
     if (r) { skip(r, c.email, c.i); continue; }
     const routed = routeContact(c.row);
     const template = firstTemplateFor(settings, lane, routed);
-    const p = problems(personalise(templates[template] || {}, c.row, template), withWording({ ...c.row, _segment: template, sender_name: 'x' }), footer);
+    const sendRow = rowFor(settings, c.row);
+    const p = problems(personalise(templates[template] || {}, sendRow, template), withWording({ ...sendRow, _segment: template, sender_name: 'x' }), footer);
     if (!p.ok) {
       const key = `${template}: ${[...p.missing.map((f) => `{{${f}}} missing`), ...p.empty.map((f) => `{{${f}}} empty`)].join(', ') || 'template empty'}`;
       report.placeholderWarnings[key] = (report.placeholderWarnings[key] || 0) + 1;
@@ -314,26 +321,47 @@ export async function uploadContacts(csv, { includeUnverified = false, now = Dat
   return report;
 }
 
-// filter: 'all', 'personal' (has a subject_line or opening_line) or 'standard'.
-// personal / standard count the whole queue, whatever the filter.
+// Categories switched off on the Sending tab (Virtual assistants by default).
+// A contact whose first email would use one waits in the queue; one already
+// emailed with one gets no follow-up. Switching it back on resumes both.
+export const templateOff = (settings, templateId) => Boolean(templateId) && (settings?.skipTemplates || []).includes(templateId);
+export const offReason = (templateId) => `${(SEGMENTS.find((s) => s.id === templateId) || {}).label || templateId} emails are switched off`;
+
+// A contact's row as the first email sees it: without its subject_line and
+// opening_line unless the Sending tab's "personal lines" switch is on, so the
+// email is the dashboard template for the contact's category. The stored row
+// keeps them either way.
+export function rowFor(settings, row) {
+  if (settings?.personalLines || !row) return row;
+  const out = { ...row };
+  delete out.subject_line;
+  delete out.opening_line;
+  return out;
+}
+
+// filter: 'all', 'personal' (has a subject_line or opening_line that will be
+// used) or 'standard'. personal / standard count the whole queue, whatever the filter.
 export const personalLines = (row) => ({ subjectLine: String(row?.subject_line ?? '').trim(), openingLine: String(row?.opening_line ?? '').trim() });
 export async function queueView({ offset = 0, limit = 200, lane = 'regular', filter = 'all' } = {}) {
   lane = normLane(lane);
   const emails = (await command('LRANGE', K.queueOf(lane), 0, -1)) || [];
-  const settings = lane === 'regular' ? null : await readSettings();
+  const settings = await readSettings();
   const rows = [];
   for (let i = 0; i < emails.length; i += 500) {
     const chunk = emails.slice(i, i + 500);
     const recs = (await command('HMGET', K.contacts, ...chunk)) || [];
     chunk.forEach((e, j) => rows.push({ e, c: parse(recs[j], { email: e }), position: i + j + 1 }));
   }
-  const isPersonal = (x) => { const p = personalLines(x.c.row); return Boolean(p.subjectLine || p.openingLine); };
+  const isPersonal = (x) => { const p = personalLines(rowFor(settings, x.c.row)); return Boolean(p.subjectLine || p.openingLine); };
   const personal = rows.filter(isPersonal).length;
   const picked = filter === 'personal' ? rows.filter(isPersonal) : filter === 'standard' ? rows.filter((x) => !isPersonal(x)) : rows;
   return { lane, total: emails.length, personal, standard: emails.length - personal, filter, matched: picked.length,
-    items: picked.slice(offset, offset + limit).map(({ e, c, position }) => ({ email: e, position,
-      template: settings ? firstTemplateFor(settings, lane, c.template) : c.template, company: c.row?.company || '',
-      name: c.row?.name || c.row?.first_name || '', addedAt: c.addedAt, ...personalLines(c.row) })) };
+    personalLinesOn: Boolean(settings.personalLines),
+    items: picked.slice(offset, offset + limit).map(({ e, c, position }) => {
+      const template = firstTemplateFor(settings, lane, c.template);
+      return { email: e, position, template, company: c.row?.company || '', ...(templateOff(settings, template) ? { off: offReason(template) } : {}),
+        name: c.row?.name || c.row?.first_name || '', addedAt: c.addedAt, ...personalLines(rowFor(settings, c.row)) };
+    }) };
 }
 
 // Exactly what a queued or planned contact's first email will look like: the
@@ -353,11 +381,12 @@ export async function previewContact(email) {
   }
   account ||= laneAccounts(config, settings, lane)[0] || accountsOf(config)[0] || '';
   const ro = renderOptsFor(settings, lane);
-  const r = renderEmail({ contact: { ...(c.row || { email: e }), _segment: templateId }, templates: templatesFor(config, settings), templateId,
+  const row = rowFor(settings, c.row || { email: e });
+  const r = renderEmail({ contact: { ...row, _segment: templateId }, templates: templatesFor(config, settings), templateId,
     senderName: (config.senders || {})[account] || '', token: 'preview0000000', footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
   return { email: e, name: c.row?.name || c.row?.first_name || '', company: c.row?.company || '', status: c.status || 'queued', lane,
     account, at, templateId, subject: r.subject, text: r.text, html: r.html || '', plain: Boolean(r.plain), personal: r.personal,
-    ...personalLines(c.row), problems: r.problems };
+    ...personalLines(row), problems: r.problems };
 }
 
 export async function removeFromQueue(email) {
@@ -526,6 +555,7 @@ export async function buildPlan(date, now, settings) {
         const lane = contactLane(rec);
         if (laneOfAcct[rec.account] !== lane) continue;
         if (lane !== 'regular' && !laneOpts(settings, lane).followUps) continue;
+        if (templateOff(settings, rec.touches[0]?.template)) continue;   // stays in rotation until switched back on
         byAcct[rec.account].push({ email: rec.email, template: followupTemplateFor(settings, lane), followUp: true, touch: touches + 1, company: rec.company || '', ...laneTag(lane) });
       }
     }
@@ -542,6 +572,8 @@ export async function buildPlan(date, now, settings) {
     let total = Object.values(need).reduce((s, n) => s + n, 0);
     const picked = [];
     const strays = [];
+    const held = [];                          // category switched off: they wait, in order
+    const tplOf = (c) => firstTemplateFor(settings, lane, c.template || routeContact(c.row || {}));
     while (picked.length < total) {
       const popped = [].concat((await command('LPOP', K.queueOf(lane), total - picked.length)) || []);
       if (!popped.length) break;
@@ -553,16 +585,18 @@ export async function buildPlan(date, now, settings) {
         if (contactLane(c) !== lane) { strays.push(c); return; }   // belt and braces: back to its own lane
         const r = reasons.get(e);
         if (r) skipped.push({ ...c, status: 'skipped', reason: r });
+        else if (templateOff(settings, tplOf(c))) held.push(c);
         else picked.push(c);
       });
     }
+    if (held.length) await command('LPUSH', K.queueOf(lane), ...held.map((c) => c.email).reverse());
     for (const c of strays) await command('RPUSH', K.queueOf(contactLane(c)), c.email);
     for (const c of picked) {
       const max = Math.max(...laneActive.map((a) => need[a]));
       const choices = laneActive.filter((a) => need[a] === max);
       const a = choices[Math.floor(rand() * choices.length)];
       need[a]--;
-      byAcct[a].push({ email: c.email, template: firstTemplateFor(settings, lane, c.template || routeContact(c.row || {})), followUp: false, touch: 1, company: c.row?.company || '', ...laneTag(lane) });
+      byAcct[a].push({ email: c.email, template: tplOf(c), followUp: false, touch: 1, company: c.row?.company || '', ...laneTag(lane) });
     }
     allPicked.push(...picked);
   }
@@ -738,6 +772,10 @@ export async function sendItem(item, { now = Date.now(), today = eatDate(now), b
 
   let reason = await checkOne(email, { settings, firstTouch });
   const rec = parse(await command('HGET', K.sent, email));
+  // A category switched off after this was planned: it waits (a first email
+  // goes back to the queue, a follow-up stays in rotation).
+  const category = firstTouch ? item.template : rec?.touches?.[0]?.template;
+  if (!reason && templateOff(settings, category)) return skipItem('deferred', offReason(category));
   if (!reason && item.followUp && rec && contactLane(rec) !== lane) {
     return skipItem('deferred', `first email went out in the ${LANE_LABEL[contactLane(rec)]} lane`);
   }
@@ -768,7 +806,7 @@ export async function sendItem(item, { now = Date.now(), today = eatDate(now), b
   const token = newToken();
   const senderName = (config.senders || {})[item.account] || '';
   const ro = renderOptsFor(settings, lane);
-  const r = renderEmail({ contact: { ...row, _segment: item.template }, templates: templatesFor(config, settings),
+  const r = renderEmail({ contact: { ...rowFor(settings, row), _segment: item.template }, templates: templatesFor(config, settings),
     templateId: item.template, senderName, token, footer: ro.plain ? '' : settings.footer, plain: ro.plain, optOut: ro.optOut });
   if (settings.blockOnPlaceholderIssues && !r.problems.ok) {
     const why = [...r.problems.missing.map((f) => `{{${f}}} missing`), ...r.problems.empty.map((f) => `{{${f}}} empty`),
@@ -800,9 +838,9 @@ export async function sendItem(item, { now = Date.now(), today = eatDate(now), b
   const logId = `${now.toString(36)}${token.slice(0, 6)}`;
   const mail = r.plain
     // Plain text: a single text/plain part, no HTML, no List-Unsubscribe link.
-    ? { from: senderName ? { name: senderName, address: item.account } : item.account, to: email, subject: r.subject, text: r.text }
+    ? { from: fromHeader(senderName, item.account), to: email, subject: r.subject, text: r.text }
     : {
-      from: senderName ? { name: senderName, address: item.account } : item.account,
+      from: fromHeader(senderName, item.account),
       to: email,
       subject: r.subject,
       text: r.text,
@@ -922,8 +960,10 @@ export async function testBatchPlan({ now = Date.now(), lane = 'regular' } = {})
   candidates.forEach((e, i) => {
     const c = recs[i];
     if (!c || c.status === 'removed' || contactLane(c) !== lane) return;
+    const template = firstTemplateFor(settings, lane, c.template || routeContact(c.row || {}));
     if (reasons.get(e)) suppressed.push({ email: e, reason: reasons.get(e) });
-    else ready.push({ email: e, template: firstTemplateFor(settings, lane, c.template || routeContact(c.row || {})), company: c.row?.company || '' });
+    else if (templateOff(settings, template)) suppressed.push({ email: e, reason: offReason(template) });
+    else ready.push({ email: e, template, company: c.row?.company || '' });
   });
   const accounts = await testAccounts(settings, config, today, lane);
   const usable = accounts.filter((a) => !a.blocked).sort((x, y) => x.tests - y.tests || x.order - y.order);
@@ -1007,7 +1047,8 @@ export async function testFollowUpPlan({ now = Date.now(), lane = 'regular' } = 
   for (const { email, rec } of withSends) {
     const touches = rec.touches.length;
     const base = { email, account: rec.account, touch: touches + 1, company: rec.company || '' };
-    const why = reasons.get(email) || (rec.repliedAt ? 'replied' : rec.bouncedAt ? 'bounced before' : rec.unsubscribedAt ? 'unsubscribed' : null);
+    const why = reasons.get(email) || (rec.repliedAt ? 'replied' : rec.bouncedAt ? 'bounced before' : rec.unsubscribedAt ? 'unsubscribed' : null)
+      || (templateOff(settings, rec.touches[0]?.template) ? offReason(rec.touches[0].template) : null);
     if (why) { skipped.push({ ...base, reason: why }); continue; }
     if (touches >= config.maxTouches) { skipped.push({ ...base, touch: touches, reason: `reached max touches (${touches} of ${config.maxTouches})` }); continue; }
     const acc = byAcct[rec.account];

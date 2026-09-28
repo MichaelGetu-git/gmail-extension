@@ -663,7 +663,7 @@ loaders.templates = async () => {
   if (!ACCOUNTS.length) ACCOUNTS = Object.keys(cfg.senders);
   $('segTabs').innerHTML = TPL.map(([id, l]) => `<button data-seg="${id}" class="${id === seg ? 'on' : ''}"><i style="background:${segColor(id)}"></i>${l}</button>`).join('');
   $('senders').innerHTML = Object.entries(cfg.senders).map(([a, n]) =>
-    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="The Zemenay team"></label>`).join('');
+    `<label class="f"><span><span class="dot" style="background:${acctColor(a)};margin-right:6px"></span>${esc(a)}</span><input data-sender="${esc(a)}" value="${esc(n)}" placeholder="Name, e.g. Berry (empty: signs as The Zemenay team)" aria-label="Name for ${esc(a)}"></label>`).join('');
   $('cDaily').value = cfg.dailyLimit; $('cFuDays').value = cfg.followUpDays; $('cTouches').value = cfg.maxTouches;
   $('pvAccount').innerHTML = Object.keys(cfg.senders).map((a) => `<option>${esc(a)}</option>`).join('');
   $('tStatus').textContent = `live version v${cfg.version || 0}${cfg.updatedAt ? `, saved ${when(cfg.updatedAt)}` : ' (built-in defaults)'}`;
@@ -778,10 +778,11 @@ loaders.sending = async () => {
   $('sWs').value = s.windowStart; $('sWe').value = s.windowEnd; $('sCut').value = s.lateCutoff; $('sCap').value = s.perAccountCap;
   $('sMin').value = s.minGapMin; $('sMax').value = s.maxGapMin; $('sFresh').value = s.replyCheckHours;
   $('sFu').checked = s.followUps; $('sRole').checked = s.skipRoleAddresses; $('sFree').checked = s.freemailDomainExempt;
-  $('sBlock').checked = s.blockOnPlaceholderIssues; $('sLU').checked = s.listUnsubscribe; $('sDry').checked = s.dryRun; $('sFooter').value = s.footer;
+  $('sBlock').checked = s.blockOnPlaceholderIssues; $('sPers').checked = Boolean(s.personalLines); $('sLU').checked = s.listUnsubscribe; $('sDry').checked = s.dryRun; $('sFooter').value = s.footer;
   $('sTestTo').value = (s.testRecipients || []).join('\n');
   $('sRegPlain').checked = Boolean(s.lanes?.regular?.plainText); $('sRegOpt').checked = Boolean(s.lanes?.regular?.optOutLine);
   $('sDays').innerHTML = [1, 2, 3, 4, 5, 6, 0].map((i) => `<label><input type="checkbox" data-day="${i}" ${s.weekdays.includes(i) ? 'checked' : ''}><span>${DAYS[i]}</span></label>`).join('');
+  $('sCats').innerHTML = TPL.filter(([id]) => id !== 'followup').map(([id, l]) => `<label><input type="checkbox" data-cat="${id}" ${(s.skipTemplates || []).includes(id) ? '' : 'checked'}><span>${l}</span></label>`).join('');
   $('tsAcct').innerHTML = ov.accounts.map((a) => `<option>${esc(a.account)}</option>`).join('');
   $('tsTpl').innerHTML = TPL.map(([id, l]) => `<option value="${id}">${l}</option>`).join('') +
     '<option value="lane">Work/Hot account: its lane\'s first email</option><option value="lane-followup">Work/Hot account: its lane\'s follow-up</option>';
@@ -799,8 +800,9 @@ $('sSave').onclick = async () => {
   const settings = { windowStart: $('sWs').value, windowEnd: $('sWe').value, lateCutoff: $('sCut').value, perAccountCap: +$('sCap').value,
     minGapMin: +$('sMin').value, maxGapMin: +$('sMax').value, replyCheckHours: +$('sFresh').value,
     followUps: $('sFu').checked, skipRoleAddresses: $('sRole').checked, freemailDomainExempt: $('sFree').checked,
-    blockOnPlaceholderIssues: $('sBlock').checked, listUnsubscribe: $('sLU').checked, dryRun: $('sDry').checked, footer: $('sFooter').value, testRecipients: $('sTestTo').value,
+    blockOnPlaceholderIssues: $('sBlock').checked, personalLines: $('sPers').checked, listUnsubscribe: $('sLU').checked, dryRun: $('sDry').checked, footer: $('sFooter').value, testRecipients: $('sTestTo').value,
     weekdays: [...document.querySelectorAll('[data-day]')].filter((c) => c.checked).map((c) => +c.dataset.day),
+    skipTemplates: [...document.querySelectorAll('[data-cat]')].filter((c) => !c.checked).map((c) => c.dataset.cat),
     lanes: { regular: { plainText: $('sRegPlain').checked, optOutLine: $('sRegOpt').checked } } };
   if (settings.lanes.regular.plainText && !ov?.settings?.lanes?.regular?.plainText
     && !confirm('Turn on plain text for the Regular lane?\n\nRegular emails would go out with no footer (so no unsubscribe link), no logo and no open tracking.')) return;
@@ -918,12 +920,13 @@ loaders.queue = async () => {
   $('qFilter').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.f === qFilterSel));
   const cov = rate(q.personal, q.total);
   $('qCoverage').innerHTML = q.total ? `<div class="pz-cov"><span class="dot" style="background:${PZ}"></span><span><b style="color:var(--text)">${fmt(q.personal)}</b> of ${fmt(q.total)} personalised</span>
-    <div class="track" role="img" aria-label="${pctTxt(cov, 0)} personalised"><div style="width:${((cov || 0) * 100).toFixed(1)}%"></div></div><span>${pctTxt(cov, 0)}</span><span class="sub">· ${fmt(q.standard)} on the standard template</span></div>` : '';
-  const emptyMsg = q.total && q.filter === 'personal' ? ['No personalised contacts in the queue', 'Upload a CSV with subject_line / opening_line columns, and tick "Update contacts already uploaded" to add them to contacts already here.']
+    <div class="track" role="img" aria-label="${pctTxt(cov, 0)} personalised"><div style="width:${((cov || 0) * 100).toFixed(1)}%"></div></div><span>${pctTxt(cov, 0)}</span><span class="sub">· ${fmt(q.standard)} on the standard template${q.personalLinesOn === false ? ' (the CSV\'s own subject and opening lines are off, see Sending)' : ''}</span></div>` : '';
+  const emptyMsg = q.total && q.filter === 'personal' && q.personalLinesOn === false ? ['No personalised contacts in the queue', 'The CSV\'s own subject and opening lines are switched off on the Sending tab, so every first email uses the template for its category.']
+    : q.total && q.filter === 'personal' ? ['No personalised contacts in the queue', 'Upload a CSV with subject_line / opening_line columns, and tick "Update contacts already uploaded" to add them to contacts already here.']
     : q.total && q.filter === 'standard' ? ['Every queued contact is personalised', 'Nothing here uses the standard template.'] : ['The queue is empty', 'Upload a CSV under Contacts &amp; suppression.'];
   $('queue').innerHTML = '<tr><th>#</th><th>Recipient</th><th>Company</th><th>Template</th><th>Personal line</th><th>Added</th><th></th></tr>' +
     (q.items.length ? q.items.map((x) => `<tr><td class="sub">${x.position}</td><td>${esc(x.name) || '<span class="sub">—</span>'}<div class="sub">${esc(x.email)}</div></td><td>${esc(x.company)}</td>
-      <td><span class="legend" style="margin:0;display:inline-flex"><span><i style="background:${segColor(x.template)}"></i>${esc(TPL_LABEL[x.template] || x.template)}</span></span></td>
+      <td><span class="legend" style="margin:0;display:inline-flex"><span><i style="background:${segColor(x.template)}"></i>${esc(TPL_LABEL[x.template] || x.template)}</span></span>${x.off ? ` <span class="pill warn" title="${esc(x.off)}">not sent: switched off</span>` : ''}</td>
       <td>${personalCell(x)}</td><td>${when(x.addedAt)}</td>
       <td class="n" style="white-space:nowrap"><button class="btn small" data-pv="${esc(x.email)}">Preview</button> <button class="btn small ghost" data-rm="${esc(x.email)}">Remove</button></td></tr>`).join('')
       : `<tr><td colspan="7" style="border:0;padding:0"><div class="empty" style="min-height:110px">${ICON.inbox}<b>${emptyMsg[0]}</b><span>${emptyMsg[1]}</span></div></td></tr>`);
