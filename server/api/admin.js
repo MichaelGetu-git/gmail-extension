@@ -10,7 +10,7 @@ import { body, isAdmin, send, teamCors } from './_auth.js';
 import { readConfig, cleanConfig, saveConfig, HISTORY_KEY } from './config.js';
 import {
   K, readSettings, writeSettings, cleanSettings, readAccountStates, patchAccountState,
-  hasPassword, passwordVar, eatWeekday, nextWeekday, sendingDay, CAP_MAX,
+  hasPassword, passwordVar, mailServer, serverVar, eatWeekday, nextWeekday, sendingDay, CAP_MAX,
   LANES, LANE_LABEL, laneOf, laneOpts, normLane, contactLane, cleanLanes, FIRST_TEMPLATE_CHOICES,
 } from './_settings.js';
 import {
@@ -144,7 +144,8 @@ const actions = {
       const ns = cleanSettings({ accountLanes: { [a]: lane } }, ps);
       await writeSettings(ns);
       await invalidatePlans(Date.now(), { includeUntouchedToday: true });
-      return { account: a, lane: laneOf(ns, a), added: !exists, passwordVar: passwordVar(a), hasPassword: hasPassword(a) };
+      return { account: a, lane: laneOf(ns, a), added: !exists, passwordVar: passwordVar(a), hasPassword: hasPassword(a),
+        server: mailServer(a).smtp, customServer: mailServer(a).custom, serverVar: serverVar(a) };
     });
   },
 

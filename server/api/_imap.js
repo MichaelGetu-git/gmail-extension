@@ -10,10 +10,10 @@
 // pointing at one of our Message-IDs (someone answering from another address).
 // Out-of-office and other auto-responders are reported apart, never as replies.
 import { ImapFlow } from 'imapflow';
-import { getPassword } from './_settings.js';
+import { getPassword, mailServer } from './_settings.js';
 
 let factory = (account) => new ImapFlow({
-  host: 'imap.gmail.com', port: 993, secure: true,
+  host: mailServer(account).imap, port: 993, secure: true,
   auth: { user: account, pass: getPassword(account) },
   logger: false, socketTimeout: 20000,
 });

@@ -303,6 +303,7 @@ so the extension fills `{{nick_name}}` the same way.
 | `GMAIL_APP_PASSWORD_BROOKKDANIELL` | app password for brookkdaniell@gmail.com |
 | `GMAIL_APP_PASSWORD_BERRYYDANIEL` | app password for berryydaniel@gmail.com |
 | `GMAIL_APP_PASSWORD_NOAHADANIAL` | app password for noahadanial@gmail.com |
+| `MAIL_SERVER_<DOMAIN>` | optional; the mail server for accounts at a domain not hosted by Google, e.g. `MAIL_SERVER_AFRICANRECRUITMENT_COM` = `mail.africanrecruitment.com` |
 | `TRACKER_URL` | optional; defaults to `https://mailer-tracker.vercel.app` |
 
 The rule for a password variable is `GMAIL_APP_PASSWORD_` plus the part before
@@ -311,6 +312,16 @@ account (Google Account → Security → App passwords); spaces are ignored. The
 are only ever handed to the SMTP/IMAP client: never logged, stored or returned.
 An account without one simply doesn't send (the dashboard says so). Redeploy
 after changing env vars.
+
+**Accounts not on Google** (a work address on cPanel or similar hosting) use
+the same password variable, holding the mailbox's own password, plus one
+`MAIL_SERVER_` variable for their domain: `MAIL_SERVER_` and the domain,
+uppercased, with every other character as `_`. Every account at that domain
+then sends over SMTP on port 465 and reads replies over IMAP on port 993 of
+that host, both TLS. A domain without one uses smtp.gmail.com / imap.gmail.com,
+as Google Workspace needs. The dashboard's account table shows "via <host>"
+for these accounts. Such hosts do not save a copy in the account's Sent
+folder; the *Send log* has every email.
 
 ### The trigger (something must call `/api/tick`)
 

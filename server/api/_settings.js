@@ -256,6 +256,18 @@ export const passwordVar = (account) =>
 export const hasPassword = (account) => Boolean(process.env[passwordVar(account)]);
 export const getPassword = (account) => String(process.env[passwordVar(account)] || '').replace(/\s+/g, '');
 
+// The mail server an account signs in to. Gmail and Google Workspace use
+// Google's, which is the default, so those accounts need nothing here. A domain
+// whose mail is hosted elsewhere (cPanel and the like) names its server once:
+//   dawit@africanrecruitment.com -> MAIL_SERVER_AFRICANRECRUITMENT_COM=mail.africanrecruitment.com
+// SMTP is then that host on 465 and IMAP on 993 (both TLS), with the password above.
+export const serverVar = (account) =>
+  `MAIL_SERVER_${String(account).split('@').pop().toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+export function mailServer(account) {
+  const host = String(process.env[serverVar(account)] || '').trim().toLowerCase();
+  return host ? { smtp: host, imap: host, custom: true } : { smtp: 'smtp.gmail.com', imap: 'imap.gmail.com', custom: false };
+}
+
 // ---- time, always Africa/Nairobi (UTC+3, no daylight saving)
 export const EAT_OFFSET = 3 * 3600000;
 export const DAY = 86400000;

@@ -1038,6 +1038,19 @@ await reset();
   check('account health shows lane, plain flag and the lane cap', hl.find((a) => a.account === WORK).lane === 'work' && hl.find((a) => a.account === WORK).plainText && hl.find((a) => a.account === WORK).cap === 3
     && hl.find((a) => a.account === ACCOUNTS[0]).lane === 'regular' && hl.find((a) => a.account === ACCOUNTS[0]).cap === 5);
 
+  // --- a domain hosted outside Google (cPanel etc.) names its mail server
+  check('mail server: Gmail and Workspace accounts default to Google', S.mailServer(ACCOUNTS[0]).smtp === 'smtp.gmail.com'
+    && S.mailServer(WORK).imap === 'imap.gmail.com' && !S.mailServer(WORK).custom && hl.find((a) => a.account === WORK).customServer === false
+    && add1.json.serverVar === 'MAIL_SERVER_ZEMENAY_WORK_EXAMPLE');
+  process.env.MAIL_SERVER_ZEMENAY_WORK_EXAMPLE = ' Mail.Zemenay-Work.example ';
+  const hls = (await admin('overview')).json.accounts;
+  check('mail server: MAIL_SERVER_<DOMAIN> moves SMTP and IMAP for that domain only, password var unchanged',
+    S.mailServer(WORK).smtp === 'mail.zemenay-work.example' && S.mailServer(WORK).imap === 'mail.zemenay-work.example'
+    && S.mailServer(HOT).smtp === 'smtp.gmail.com' && hls.find((a) => a.account === WORK).server === 'mail.zemenay-work.example'
+    && hls.find((a) => a.account === WORK).customServer && !hls.find((a) => a.account === HOT).customServer
+    && S.passwordVar(WORK) === 'GMAIL_APP_PASSWORD_RAFAEL_WORK' && S.serverVar('dawit@africanrecruitment.com') === 'MAIL_SERVER_AFRICANRECRUITMENT_COM');
+  delete process.env.MAIL_SERVER_ZEMENAY_WORK_EXAMPLE;
+
   // --- opt-out line (separate toggle, off by default)
   await admin('lanes.save', { lanes: { hot: { optOutLine: true } } });
   await admin('contacts.upload', { csv: leads('ho', 1), lane: 'hot' });

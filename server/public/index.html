@@ -181,7 +181,7 @@
       <section class="view hidden" id="v-sending">
         <div id="pauseBanner"></div>
         <div class="card mb">
-          <div class="card-h"><div><h2>Accounts</h2><p class="cap">Sends from the server over Gmail SMTP with each account's app password. An account pauses itself on a login failure, 3 failures in a row, or a bounce rate above 5%. The <b>Lane</b> column decides which contacts an account sends: Regular (the main Contacts list), Work or Hot (the Hot leads page). Lanes never mix.</p></div></div>
+          <div class="card-h"><div><h2>Accounts</h2><p class="cap">Sends from the server over SMTP (Gmail's, or the account's own mail server) with each account's password. An account pauses itself on a login failure, 3 failures in a row, or a bounce rate above 5%. The <b>Lane</b> column decides which contacts an account sends: Regular (the main Contacts list), Work or Hot (the Hot leads page). Lanes never mix.</p></div></div>
           <div class="grid g-acc mb" id="sAccounts"></div>
           <div class="tbl-wrap"><table id="accts" class="nowrap"></table></div>
           <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line-2)">
@@ -192,7 +192,7 @@
               <label class="f">Lane <select id="addLane"><option value="work">Work</option><option value="hot">Hot</option><option value="regular">Regular</option></select></label>
               <button class="btn primary" id="addGo">Add account</button>
             </div>
-            <p class="cap" id="addStatus" style="margin:8px 0 0">Gmail or Google Workspace addresses (sent through smtp.gmail.com). The account sends nothing until its app password is set in Vercel (the variable name is shown after adding) and the project is redeployed; sending also stays under the global pause.</p>
+            <p class="cap" id="addStatus" style="margin:8px 0 0">Gmail and Google Workspace addresses send through smtp.gmail.com. An address whose mail is hosted elsewhere also needs its mail server in Vercel (<code>MAIL_SERVER_</code> plus the domain, e.g. <code>MAIL_SERVER_EXAMPLE_COM</code> = mail.example.com). The account sends nothing until its password is set in Vercel (the variable name is shown after adding) and the project is redeployed; sending also stays under the global pause.</p>
           </div>
         </div>
         <div class="card mb">

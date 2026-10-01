@@ -451,7 +451,7 @@ function accountCards(id, prefix, withActions) {
   const days14 = (an?.days || []).slice(-14);
   $(id).innerHTML = ov.accounts.map((a, i) => {
     const c = acctColor(a.account);
-    const state = !a.hasPassword ? ['bad', 'No app password'] : a.paused ? [a.autoPaused ? 'bad' : 'warn', a.autoPaused ? 'Auto-paused' : 'Paused'] : ['ok', 'Active'];
+    const state = !a.hasPassword ? ['bad', a.customServer ? 'No password' : 'No app password'] : a.paused ? [a.autoPaused ? 'bad' : 'warn', a.autoPaused ? 'Auto-paused' : 'Paused'] : ['ok', 'Active'];
     const b = a.bounceRate50;
     return `<div class="card acc" style="box-shadow:none">
       <div class="head"><div class="avatar" style="background:${c}">${esc(short(a.account)[0]?.toUpperCase() || '?')}</div>
@@ -754,8 +754,8 @@ loaders.sending = async () => {
   });
   $('pauseAll')?.addEventListener('click', async () => { try { await api('settings.save', { settings: { paused: true } }); toast('Paused'); reload(); } catch (e) { handleErr(e); } });
   accountCards('sAccounts', 'sa', true);
-  $('accts').innerHTML = '<tr><th>Account</th><th>Lane</th><th>App password</th><th class="n">Today</th><th class="n">7d sent</th><th class="n">Opens</th><th class="n">Replies</th><th class="n">Bounces</th><th class="n">Unsubs</th><th class="n">Bounce rate (last 50)</th><th>Last send</th><th>Inbox checked</th></tr>' +
-    ov.accounts.map((a) => `<tr><td><span class="dot" style="background:${acctColor(a.account)};margin-right:8px"></span>${esc(a.account)}</td>
+  $('accts').innerHTML = '<tr><th>Account</th><th>Lane</th><th>Password</th><th class="n">Today</th><th class="n">7d sent</th><th class="n">Opens</th><th class="n">Replies</th><th class="n">Bounces</th><th class="n">Unsubs</th><th class="n">Bounce rate (last 50)</th><th>Last send</th><th>Inbox checked</th></tr>' +
+    ov.accounts.map((a) => `<tr><td><span class="dot" style="background:${acctColor(a.account)};margin-right:8px"></span>${esc(a.account)}${a.customServer ? ` <span class="sub">via ${esc(a.server)}</span>` : ''}</td>
       <td><select data-lane-acct="${esc(a.account)}" aria-label="Lane for ${esc(a.account)}">${['regular', 'work', 'hot'].map((l) => `<option value="${l}" ${(a.lane || 'regular') === l ? 'selected' : ''}>${LANE_LABEL[l]}</option>`).join('')}</select></td>
       <td>${a.hasPassword ? '<span class="pill ok">set</span>' : `<span class="pill bad">missing</span> <span class="sub mono">${esc(a.passwordVar)}</span>`}</td>
       <td class="n">${a.sentToday} / ${a.cap}</td><td class="n">${a.sent7d}</td><td class="n">${a.opened7d}</td><td class="n">${a.replied7d}</td>
@@ -814,11 +814,17 @@ $('sSave').onclick = async () => {
 $('addGo').onclick = async () => {
   const account = $('addAcct').value.trim().toLowerCase(), lane = $('addLane').value;
   if (!account) return toast('Type the email address');
-  if (!confirm(`Add ${account} as a sending account in the ${LANE_LABEL[lane]} lane?\n\nIt sends nothing until its app password is set in Vercel and sending is unpaused.`)) return;
+  if (!confirm(`Add ${account} as a sending account in the ${LANE_LABEL[lane]} lane?\n\nIt sends nothing until its password is set in Vercel and sending is unpaused.`)) return;
   try {
     const d = await api('account.add', { account, name: $('addName').value.trim(), lane });
-    $('addStatus').innerHTML = `${d.added ? 'Added' : 'Already a sending account; lane set'}: <b>${esc(d.account)}</b> → ${LANE_LABEL[d.lane]} lane. `
-      + (d.hasPassword ? 'App password is set.' : `Next: in Vercel → mailer-tracker → Settings → Environment Variables, add <code>${esc(d.passwordVar)}</code> = the account's Google app password, then redeploy.`);
+    // Gmail needs only the password; another domain may also need its mail server.
+    const todo = [];
+    if (!d.hasPassword) todo.push(`<code>${esc(d.passwordVar)}</code> = the account's password (a Google app password for Gmail or Google Workspace)`);
+    if (!d.customServer && !/@(gmail|googlemail)\.com$/.test(d.account)) {
+      todo.push(`unless its mail is on Google Workspace, <code>${esc(d.serverVar)}</code> = its mail server (often mail.${esc(d.account.split('@')[1])})`);
+    }
+    $('addStatus').innerHTML = `${d.added ? 'Added' : 'Already a sending account; lane set'}: <b>${esc(d.account)}</b> → ${LANE_LABEL[d.lane]} lane${d.customServer ? `, via ${esc(d.server)}` : ''}. `
+      + (todo.length ? `Next: in Vercel → mailer-tracker → Settings → Environment Variables, add ${todo.join('; and, ')}. Then redeploy.` : 'Password is set.');
     $('addAcct').value = ''; $('addName').value = ''; toast('Account added'); reload();
   } catch (e) { handleErr(e); }
 };

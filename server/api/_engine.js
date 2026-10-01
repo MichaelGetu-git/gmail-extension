@@ -12,7 +12,7 @@
 //   5. the hard per-account daily cap is an atomic HINCRBY, checked per send
 import { command, pipeline } from './_store.js';
 import {
-  K, readSettings, readAccountStates, patchAccountState, hasPassword, passwordVar,
+  K, readSettings, readAccountStates, patchAccountState, hasPassword, passwordVar, mailServer, serverVar,
   DAY, eatDate, eatWeekday, eatAt, eatClock, toMin, addDays, nextWeekday, dayWindow, sendingDay,
   LANES, LANE_LABEL, laneOf, laneOpts, laneCap, contactLane, normLane,
 } from './_settings.js';
@@ -1343,6 +1343,7 @@ export async function health(now = Date.now()) {
     const lane = laneOf(settings, a);
     out.push({
       account: a, name: config.senders[a] || '', hasPassword: hasPassword(a), passwordVar: passwordVar(a),
+      server: mailServer(a).smtp, customServer: mailServer(a).custom, serverVar: serverVar(a),
       lane, plainText: laneOpts(settings, lane).plainText,
       paused: Boolean(st.paused), autoPaused: Boolean(st.paused && st.auto), pauseReason: st.reason || '', pausedAt: st.at || null,
       attemptsToday: attempts[a] || 0, sentToday, sent7d: sent7, opened7d: opened,

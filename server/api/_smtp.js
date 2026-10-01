@@ -1,12 +1,13 @@
-// Gmail SMTP with an app password per account (smtp.gmail.com:465, TLS).
+// SMTP with a password per account, on port 465 (TLS): smtp.gmail.com, or the
+// account's own mail server when its domain names one (mailServer).
 //
 // The transport factory is swappable so tests (and dry-run mode) never open a
 // network connection: setTransportFactory(() => fakeTransport).
 import nodemailer from 'nodemailer';
-import { getPassword } from './_settings.js';
+import { getPassword, mailServer } from './_settings.js';
 
 let factory = (account) => nodemailer.createTransport({
-  host: 'smtp.gmail.com',
+  host: mailServer(account).smtp,
   port: 465,
   secure: true,
   auth: { user: account, pass: getPassword(account) },
