@@ -74,7 +74,13 @@ the server also needs the env vars below and a trigger.
    run hasn't reached its cutoff, today is planned first (starting from now if
    the window has already opened), never pushed to tomorrow. Default 15 per account per day, max 40.
    Follow-ups (same account as the first email, `followup` template, after
-   `followUpDays`, up to `maxTouches`) come first and count toward the cap.
+   `followUpDays`, up to `maxTouches`) come first and count toward the cap,
+   but at most **Follow-ups per account per day** of them (default 5); the
+   rest of the cap goes to new contacts. Follow-ups over that limit wait and
+   go out on the next sending days, oldest first, so a big sending day spreads
+   its follow-ups over the following days instead of filling one day with
+   them. A day never re-plans a follow-up another day's plan already holds.
+   The *Queue* tab shows each follow-up's due day and the day it goes out.
    The plan is stored in Redis, so the *Queue* tab's next-day view is what will
    actually go out. Nothing is sent after *No sends after* (default 18:00
    EAT); anything left goes back to the front of the queue for the next day.

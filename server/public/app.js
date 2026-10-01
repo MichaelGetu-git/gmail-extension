@@ -441,7 +441,7 @@ function renderPipeline() {
     <div class="minirow"><span>Stopped: ${fmt(p.replied)} replied · ${fmt(p.bounced)} bounced · ${fmt(p.unsubscribed)} unsubscribed</span></div>`;
   const data = next7.map((d) => p.dueByDay[d] || 0);
   if (!data.some(Boolean)) empty('chDue', 'Nothing due this week', '', 'clock');
-  else chart('chDue', { type: 'bar', data: { labels: next7.map((d) => DAYS[new Date(`${d}T00:00:00Z`).getUTCDay()]), datasets: [{ label: 'Due', data, backgroundColor: '#a78bfa', maxBarThickness: 18 }] },
+  else chart('chDue', { type: 'bar', data: { labels: next7.map((d) => DAYS[new Date(`${d}T00:00:00Z`).getUTCDay()]), datasets: [{ label: 'Going out', data, backgroundColor: '#a78bfa', maxBarThickness: 18 }] },
     options: { scales: { x: axisX(), y: axisY({ display: false }) } } });
 }
 
@@ -776,8 +776,8 @@ loaders.sending = async () => {
       if (d.pause || d.resume || d.scan) reload();
     } catch (err) { handleErr(err); }
   };
-  $('capMax').textContent = ov.capMax; $('sCap').max = ov.capMax;
-  $('sWs').value = s.windowStart; $('sWe').value = s.windowEnd; $('sCut').value = s.lateCutoff; $('sCap').value = s.perAccountCap;
+  $('capMax').textContent = ov.capMax; $('sCap').max = ov.capMax; $('sFuDay').max = ov.capMax;
+  $('sWs').value = s.windowStart; $('sWe').value = s.windowEnd; $('sCut').value = s.lateCutoff; $('sCap').value = s.perAccountCap; $('sFuDay').value = s.followUpsPerDay;
   $('sMin').value = s.minGapMin; $('sMax').value = s.maxGapMin; $('sFresh').value = s.replyCheckHours;
   $('sFu').checked = s.followUps; $('sRole').checked = s.skipRoleAddresses; $('sFree').checked = s.freemailDomainExempt;
   $('sBlock').checked = s.blockOnPlaceholderIssues; $('sPers').checked = Boolean(s.personalLines); $('sLU').checked = s.listUnsubscribe; $('sDry').checked = s.dryRun; $('sFooter').value = s.footer;
@@ -799,7 +799,7 @@ loaders.sending = async () => {
     <p class="cap" style="margin:14px 0 0">Something must call <code>/api/tick</code> every 1–2 minutes during sending hours (cron-job.org or an Upstash QStash schedule); see the README in <code>server/</code>.</p>`;
 };
 $('sSave').onclick = async () => {
-  const settings = { windowStart: $('sWs').value, windowEnd: $('sWe').value, lateCutoff: $('sCut').value, perAccountCap: +$('sCap').value,
+  const settings = { windowStart: $('sWs').value, windowEnd: $('sWe').value, lateCutoff: $('sCut').value, perAccountCap: +$('sCap').value, followUpsPerDay: +$('sFuDay').value,
     minGapMin: +$('sMin').value, maxGapMin: +$('sMax').value, replyCheckHours: +$('sFresh').value,
     followUps: $('sFu').checked, skipRoleAddresses: $('sRole').checked, freemailDomainExempt: $('sFree').checked,
     blockOnPlaceholderIssues: $('sBlock').checked, personalLines: $('sPers').checked, listUnsubscribe: $('sLU').checked, dryRun: $('sDry').checked, footer: $('sFooter').value, testRecipients: $('sTestTo').value,
@@ -914,15 +914,17 @@ loaders.queue = async () => {
       : `<tr><td colspan="8" class="sub">Nothing planned. Upload contacts, and check the accounts are not paused.</td></tr>`);
   // follow-ups due per day
   const today = p.today, next7 = Array.from({ length: 7 }, (_, i) => new Date(Date.parse(`${today}T00:00:00Z`) + i * 86400000).toISOString().slice(0, 10));
-  const due = next7.map((d, i) => f.items.filter((x) => (i === 0 ? x.dueDate <= d : x.dueDate === d)).length);
+  // By the day each one goes out (the daily follow-up limit pushes some later than their due day).
+  const goes = (x) => x.sendDate || x.dueDate;
+  const due = next7.map((d, i) => f.items.filter((x) => (i === 0 ? goes(x) <= d : goes(x) === d)).length);
   if (!due.some(Boolean)) empty('chFuDue', 'No follow-ups due this week', 'Contacts get a follow-up after the set number of days without a reply.', 'clock');
   else chart('chFuDue', { type: 'bar', data: { labels: next7.map((d, i) => (i === 0 ? 'Today' : `${DAYS[new Date(`${d}T00:00:00Z`).getUTCDay()]} ${dayLabel(d)}`)),
-    datasets: ACCOUNTS.map((a) => ({ label: short(a), data: next7.map((d, i) => f.items.filter((x) => x.account === a && (i === 0 ? x.dueDate <= d : x.dueDate === d)).length), backgroundColor: acctColor(a), stack: 'f', maxBarThickness: 28 })) },
+    datasets: ACCOUNTS.map((a) => ({ label: short(a), data: next7.map((d, i) => f.items.filter((x) => x.account === a && (i === 0 ? goes(x) <= d : goes(x) === d)).length), backgroundColor: acctColor(a), stack: 'f', maxBarThickness: 28 })) },
     options: { interaction: { mode: 'index', intersect: false }, plugins: { tooltip: { filter: (i) => i.raw > 0 } }, scales: { x: axisX({ stacked: true }), y: axisY({ stacked: true }) } } });
   $('fuCap').textContent = `${f.items.length} due in the next 7 days`;
-  $('fus').innerHTML = '<tr><th>Due</th><th>Recipient</th><th>Account</th><th class="n">Touches</th></tr>' +
-    (f.items.length ? f.items.map((x) => `<tr><td>${esc(x.dueDate)}</td><td>${esc(x.email)}<div class="sub">${esc(x.company)}</div></td><td><span class="dot" style="background:${acctColor(x.account)};margin-right:6px"></span>${esc(short(x.account))}</td><td class="n">${x.touches}</td></tr>`).join('')
-      : '<tr><td colspan="4" class="sub">No follow-ups due in the next 7 days.</td></tr>');
+  $('fus').innerHTML = '<tr><th>Due</th><th>Goes out</th><th>Recipient</th><th>Account</th><th class="n">Touches</th></tr>' +
+    (f.items.length ? f.items.map((x) => `<tr><td>${esc(x.dueDate)}</td><td>${esc(goes(x) < today ? today : goes(x))}</td><td>${esc(x.email)}<div class="sub">${esc(x.company)}</div></td><td><span class="dot" style="background:${acctColor(x.account)};margin-right:6px"></span>${esc(short(x.account))}</td><td class="n">${x.touches}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="sub">No follow-ups due in the next 7 days.</td></tr>');
   const shown = q.filter === 'all' ? '' : ` · showing ${q.filter === 'personal' ? 'personalised' : 'standard'} only (${fmt(q.matched)})`;
   $('qCap').textContent = `${fmt(q.total)} contacts waiting, oldest first${shown}${q.matched > q.items.length ? `, first ${q.items.length} shown` : ''}`;
   $('qFilter').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.f === qFilterSel));

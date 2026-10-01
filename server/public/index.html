@@ -202,6 +202,7 @@
             <label class="f">Window end (latest start) <input id="sWe" type="time"></label>
             <label class="f">No sends after <input id="sCut" type="time"></label>
             <label class="f"><span>Per account per day (max <span id="capMax">40</span>)</span><input id="sCap" type="number" min="1" max="40"></label>
+            <label class="f" title="The rest of each account's daily sends go to new contacts. Follow-ups over the limit go out on the next sending days, oldest first."><span>Follow-ups per account per day</span><input id="sFuDay" type="number" min="1" max="40"></label>
             <label class="f">Min gap (minutes) <input id="sMin" type="number" min="1" max="60"></label>
             <label class="f">Max gap (minutes) <input id="sMax" type="number" min="1" max="90"></label>
             <label class="f">Reply check freshness (hours) <input id="sFresh" type="number" min="1" max="168"></label>
@@ -258,7 +259,7 @@
         </div>
         <div class="grid g-1-1 mb">
           <div class="card">
-            <div class="card-h"><div><h2>Follow-ups due</h2><p class="cap">Next 7 days, per day.</p></div></div>
+            <div class="card-h"><div><h2>Follow-ups due</h2><p class="cap">Next 7 days, by the day they go out: at most the set number per account a day, oldest first.</p></div></div>
             <div class="chart sm" id="chFuDue"></div>
           </div>
           <div class="card">

@@ -67,6 +67,9 @@ export const DEFAULT_SETTINGS = {
   maxGapMin: 8,
   lateCutoff: '18:00',
   followUps: true,
+  // At most this many of an account's daily sends are follow-ups; the rest of
+  // its cap goes to new contacts. Follow-ups over the limit wait, oldest first.
+  followUpsPerDay: 5,
   replyCheckHours: 24,
   footer: DEFAULT_FOOTER,
   listUnsubscribe: true,
@@ -183,6 +186,7 @@ export function cleanSettings(input = {}, prev = DEFAULT_SETTINGS) {
     maxGapMin: int(input.maxGapMin, 1, 90, p.maxGapMin),
     lateCutoff: time(input.lateCutoff, p.lateCutoff),
     followUps: bool(input.followUps, p.followUps),
+    followUpsPerDay: int(input.followUpsPerDay, 1, CAP_MAX, p.followUpsPerDay),
     replyCheckHours: int(input.replyCheckHours, 1, 168, p.replyCheckHours),
     footer: input.footer !== undefined ? String(input.footer).slice(0, 1000) : p.footer,
     listUnsubscribe: bool(input.listUnsubscribe, p.listUnsubscribe),

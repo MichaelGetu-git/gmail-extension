@@ -122,7 +122,7 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
 
   const due = await followUpsDue(now, 7);
   const dueByDay = {};
-  for (const x of due) bump(dueByDay, x.dueDate < today ? today : x.dueDate);
+  for (const x of due) bump(dueByDay, x.sendDate || (x.dueDate < today ? today : x.dueDate));
 
   // Send-log activity by day and status.
   const logFrom = now - logDays * DAY;

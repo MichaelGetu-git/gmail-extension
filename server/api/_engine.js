@@ -546,12 +546,22 @@ export async function buildPlan(date, now, settings) {
   }
 
   // Follow-ups first: contacts whose last email is followUpDays old by then,
-  // from the same account (and so the same lane) as their first email.
+  // from the same account (and so the same lane) as their first email. At most
+  // followUpsPerDay per account, oldest first; the rest wait in mailer:srv:fu
+  // for the next sending days, and the cap's remainder goes to new contacts.
   const byAcct = Object.fromEntries(active.map((a) => [a, []]));
   if (settings.followUps) {
     const cutoff = eatAt(date, Math.max(24 * 60, win.cutoff)) - config.followUpDays * DAY;
     const emails = (await command('ZRANGEBYSCORE', K.fu, '-inf', cutoff, 'LIMIT', 0, 1000)) || [];
     if (emails.length) {
+      // Follow-ups another day's plan already holds (today's, while it runs)
+      // go out there; this day takes the next ones in line.
+      const elsewhere = new Set();
+      for (const d of ((await command('SMEMBERS', K.plans)) || []).filter((d) => d !== date)) {
+        for (const it of (await readPlan(d)).items) {
+          if (it.followUp && (it.status === 'planned' || it.status === 'sending')) elsewhere.add(`${it.email}#${it.touch}`);
+        }
+      }
       const reasons = await checkMany(emails, { settings, firstTouch: false });
       const recs = [];
       for (let i = 0; i < emails.length; i += 300) recs.push(...(await command('HMGET', K.sent, ...emails.slice(i, i + 300))));
@@ -559,7 +569,8 @@ export async function buildPlan(date, now, settings) {
         const rec = parse(recs[i]);
         const touches = rec?.touches?.length || 0;
         if (!rec || reasons.get(emails[i]) || touches >= config.maxTouches) { await command('ZREM', K.fu, emails[i]); continue; }
-        if (!byAcct[rec.account] || byAcct[rec.account].length >= capOf(rec.account)) continue;
+        if (!byAcct[rec.account] || byAcct[rec.account].length >= Math.min(capOf(rec.account), settings.followUpsPerDay)) continue;
+        if (elsewhere.has(`${emails[i]}#${touches + 1}`)) continue;
         // Never across lanes: if the account has moved to another lane, its
         // earlier contacts' follow-ups wait (they stay in rotation).
         const lane = contactLane(rec);
@@ -1359,14 +1370,28 @@ export async function health(now = Date.now()) {
 
 export async function followUpsDue(now = Date.now(), days = 7) {
   const config = await readConfig();
+  const settings = await readSettings();
   const emails = (await command('ZRANGEBYSCORE', K.fu, '-inf', now + days * DAY - config.followUpDays * DAY, 'LIMIT', 0, 500)) || [];
   if (!emails.length) return [];
   const recs = await command('HMGET', K.sent, ...emails);
+  // sendDate: the sending day it is expected to go out, oldest first, at most
+  // followUpsPerDay per account per day, as buildPlan takes them.
+  const today = sendingDay(now, settings);
+  const placed = {};
+  const sendDateOf = (x) => {
+    if (!settings.weekdays.length || !x.account) return null;
+    const limit = Math.min(settings.followUpsPerDay, laneCap(settings, laneOf(settings, x.account)));
+    const used = (placed[x.account] ||= {});
+    let d = x.dueDate < today ? today : x.dueDate;
+    for (let i = 0; i < 366 && (!settings.weekdays.includes(eatWeekday(d)) || (used[d] || 0) >= limit); i++) d = addDays(d, 1);
+    used[d] = (used[d] || 0) + 1;
+    return d;
+  };
   return emails.map((e, i) => {
     const r = parse(recs[i], {});
     return { email: e, account: r.account, lane: contactLane(r), company: r.company, touches: r.touches?.length || 0,
       lastSentAt: r.lastSentAt, dueAt: r.lastSentAt + config.followUpDays * DAY, dueDate: eatDate(r.lastSentAt + config.followUpDays * DAY) };
-  }).filter((x) => x.touches < config.maxTouches);
+  }).filter((x) => x.touches < config.maxTouches).map((x) => ({ ...x, sendDate: sendDateOf(x) }));
 }
 
 export { eatDate, eatClock, nextWeekday, addDays };

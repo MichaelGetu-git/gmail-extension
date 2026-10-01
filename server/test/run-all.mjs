@@ -1740,6 +1740,59 @@ await reset();
   check('the page behind the link uses the same words', page.status === 200 && page.raw.includes("Don't send this again</button>") && !page.raw.includes('Unsubscribe'));
 }
 
+// ============================================================ follow-ups per day
+section('Follow-ups per day: at most 5 per account, the rest of the cap goes to new contacts, the overflow goes out on the next days in order');
+await reset();
+{
+  E.setRandom(mulberry(53));
+  check('the default is 5 follow-ups per account per day, bounded 1..40', S.DEFAULT_SETTINGS.followUpsPerDay === 5
+    && S.cleanSettings({ followUpsPerDay: 99 }).followUpsPerDay === 40 && S.cleanSettings({ followUpsPerDay: 0 }).followUpsPerDay === 1);
+  // 12 people the first account emailed a week earlier, a minute apart, all due on the same day.
+  const A = ACCOUNTS[0], sentAt = EAT('2026-11-02', '10:00');
+  const FU = Array.from({ length: 12 }, (_, i) => `fuperson${i}.smith@fuco${i}.example`);
+  for (const [i, e] of FU.entries()) {
+    const at = sentAt + i * 60000;
+    const row = { email: e, company: `FU Co ${i}`, first_name: `Fu${i}`, last_name: 'Smith', vertical: 'dental', hours_gap: 'closed weekends' };
+    await command('HSET', S.K.sent, e, JSON.stringify({ email: e, account: A, company: row.company, row, touches: [{ at, n: 1, t: `fudaytoken${String(i).padStart(6, '0')}`, template: 'callcenter' }], firstSentAt: at, lastSentAt: at }));
+    await command('ZADD', S.K.fu, at, e);
+    await command('ZADD', S.K.byAcct(A), at, e);
+  }
+  await admin('contacts.upload', { csv: makeCsv(60, { prefix: 'n' }) });
+  await saveSettings({ paused: false, perAccountCap: 15 });
+  const d1 = '2026-11-09', d2 = '2026-11-10', d3 = '2026-11-11';
+  const fuOf = (plan) => plan.items.filter((i) => i.followUp && i.account === A).map((i) => i.email).sort();
+  const sorted = (xs) => [...xs].sort();
+  const p1 = await E.ensurePlan(d1, { now: EAT(d1, '08:00') });
+  check('day 1: the first account plans 5 follow-ups (the oldest) and 10 new contacts', fuOf(p1).join() === sorted(FU.slice(0, 5)).join()
+    && p1.items.filter((i) => i.account === A && !i.followUp).length === 10 && p1.meta.accounts[A].followUps === 5, JSON.stringify(p1.meta.accounts[A]));
+  const p2 = await E.ensurePlan(d2, { now: EAT(d1, '08:01') });
+  check('day 2 planned while day 1 has not sent: the next 5 follow-ups, not day 1\'s again', fuOf(p2).join() === sorted(FU.slice(5, 10)).join(), fuOf(p2).join());
+  const due = await E.followUpsDue(EAT(d1, '08:02'), 7);
+  const when = Object.fromEntries(due.map((x) => [x.email, x.sendDate]));
+  check('the Queue projection: 5 go out on day 1, 5 on day 2, the last 2 on day 3; all were due on day 1',
+    FU.every((e, i) => when[e] === (i < 5 ? d1 : i < 10 ? d2 : d3)) && due.every((x) => x.dueDate === d1), JSON.stringify(when));
+
+  await S.patchAccountState(A, { lastImapOkAt: EAT(d1, '08:00'), lastImapAt: EAT(d1, '08:00') });
+  for (let t = EAT(d1, '08:55'); t <= EAT(d1, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const s1 = sim.sent.filter((m) => m.account === A);
+  check('day 1 sends 5 follow-ups and 10 first emails from the first account (cap 15)', s1.length === 15
+    && sorted(s1.filter((m) => FU.includes(m.to)).map((m) => m.to)).join() === sorted(FU.slice(0, 5)).join(), s1.map((m) => m.to).join(' '));
+  await S.patchAccountState(A, { lastImapOkAt: EAT(d2, '08:00'), lastImapAt: EAT(d2, '08:00') });
+  const n1 = sim.sent.length;
+  for (let t = EAT(d2, '08:55'); t <= EAT(d2, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  check('day 2 sends the next 5 follow-ups, in order', sorted(sim.sent.slice(n1).filter((m) => FU.includes(m.to)).map((m) => m.to)).join() === sorted(FU.slice(5, 10)).join());
+  const p3 = await E.ensurePlan(d3, { now: EAT(d2, '20:00') });
+  check('day 3 takes the last 2', fuOf(p3).join() === sorted(FU.slice(10)).join(), fuOf(p3).join());
+  // The next touch is a week after the follow-up actually went out, not after it was due.
+  const p8 = await E.ensurePlan('2026-11-16', { now: EAT(d2, '20:00') });
+  check('a week after day 1: the next follow-up (touch 3) to day 1\'s 5 only; day 2\'s wait until a week after day 2',
+    fuOf(p8).join() === sorted(FU.slice(0, 5)).join() && p8.items.filter((i) => i.followUp && i.account === A).every((i) => i.touch === 3)
+    && S.eatDate(Number(await command('ZSCORE', S.K.fu, FU[5]))) === d2, fuOf(p8).join());
+  const all = sim.sent.map((s) => `${s.to}|${s.subject}`);
+  check('nobody got the same follow-up twice', new Set(all).size === all.length);
+  await saveSettings({ paused: true });
+}
+
 console.log(`\n${passes} passed, ${failures} failed`);
 shim.close();
 redis.kill();
