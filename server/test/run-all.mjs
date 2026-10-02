@@ -1793,6 +1793,57 @@ await reset();
   await saveSettings({ paused: true });
 }
 
+// ============================================================ accounts sharing a name
+section('Accounts sharing the part before the @ (dawit@a, dawit@b, dawit@c): each gets its own plan items; stranded contacts go back to the queue');
+await reset();
+{
+  E.setRandom(mulberry(61));
+  const DW = ['dawit@ar-one.example', 'dawit@do-two.example', 'dawit@jf-three.example'];
+  process.env.GMAIL_APP_PASSWORD_DAWIT = 'fakepw-dawit-7777';
+  for (const a of DW) await admin('account.add', { account: a, name: 'Dawit @ ZemenayTech', lane: 'work' });
+  await admin('contacts.upload', { csv: makeCsv(30, { prefix: 'w' }), lane: 'work' });
+  await saveSettings({ paused: false });
+  const d = '2026-11-23', d2 = '2026-11-24';
+  const p = await E.ensurePlan(d, { now: EAT(d, '08:00') });
+  const per = Object.fromEntries(DW.map((a) => [a, p.items.filter((i) => i.account === a).length]));
+  const flat = await command('HGETALL', S.K.contacts);
+  const planned = [];
+  for (let i = 0; i < flat.length; i += 2) { const c = JSON.parse(flat[i + 1]); if (c.status === 'planned' && c.plannedFor === d) planned.push(c.email); }
+  check('all three Work accounts get 10 of the 30 leads, with distinct item ids', DW.every((a) => per[a] === 10) && new Set(p.items.map((i) => i.id)).size === 30, JSON.stringify(per));
+  check('every contact marked planned is in the plan', planned.length === 30 && planned.every((e) => p.items.some((i) => i.email === e)));
+  for (let t = EAT(d, '08:55'); t <= EAT(d, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const sentBy = Object.fromEntries(DW.map((a) => [a, sim.sent.filter((m) => m.account === a).length]));
+  check('each of the three sends its 10', DW.every((a) => sentBy[a] === 10), JSON.stringify(sentBy));
+
+  // A plan built before the fix: one account's items overwrote the others', so
+  // 4 of its 6 contacts are planned but in no plan, and out of the queue.
+  await admin('contacts.upload', { csv: makeCsv(6, { prefix: 'old' }), lane: 'work' });
+  const old = [].concat(await command('LPOP', S.K.queueOf('work'), 6));
+  for (const e of old) {
+    const c = JSON.parse(await command('HGET', S.K.contacts, e));
+    await command('HSET', S.K.contacts, e, JSON.stringify({ ...c, status: 'planned', plannedFor: d2 }));
+  }
+  const kept = old.slice(0, 2).map((e, i) => ({ id: `${d2}:dawit:${i}`, date: d2, account: DW[2], email: e, template: 'callcenter', followUp: false, touch: 1, at: EAT(d2, '10:00') + i * 60000, status: 'planned', lane: 'work' }));
+  await command('HSET', S.K.plan(d2), 'meta', JSON.stringify({ date: d2, builtAt: EAT(d, '09:00'), accounts: {}, lanes: {} }), ...kept.flatMap((it) => [it.id, JSON.stringify(it)]));
+  await command('SADD', S.K.plans, d2);
+  await command('DEL', S.K.fixItemIds);
+  const r = await E.tick({ now: EAT(d, '20:00'), scan: false });
+  const wq = await command('LRANGE', S.K.queueOf('work'), 0, -1);
+  const st = await Promise.all(old.map(async (e) => JSON.parse(await command('HGET', S.K.contacts, e)).status));
+  check('the repair rebuilds the old plan and puts all 6 back in the Work queue (4 stranded, 2 from the old plan)',
+    old.every((e) => wq.includes(e)) && st.every((s) => s === 'queued') && !(await command('HEXISTS', S.K.plan(d2), 'meta')), JSON.stringify({ r: r.notes, wq: wq.length, st }));
+  const logged = (await command('LRANGE', S.K.log, 0, 50)).map((j) => JSON.parse(j)).filter((e) => e.status === 'requeued');
+  check('it says so once in the log and the tick notes, and does not run again', logged.length === 1 && /^4 contacts/.test(logged[0].reason)
+    && r.notes.some((n) => /^4 contact/.test(n)) && Boolean(await command('GET', S.K.fixItemIds)), JSON.stringify(logged));
+  await E.tick({ now: EAT(d, '20:01'), scan: false });
+  check('a second tick does not repeat it', (await command('LRANGE', S.K.log, 0, 50)).map((j) => JSON.parse(j)).filter((e) => e.status === 'requeued').length === 1);
+  const p2 = await E.ensurePlan(d2, { now: EAT(d, '20:02') });
+  check('the next day plans the 6 again, spread over the three accounts', old.every((e) => p2.items.some((i) => i.email === e))
+    && DW.every((a) => p2.items.some((i) => i.account === a)), JSON.stringify(p2.items.map((i) => [i.account, i.email])));
+  delete process.env.GMAIL_APP_PASSWORD_DAWIT;
+  await saveSettings({ paused: true });
+}
+
 console.log(`\n${passes} passed, ${failures} failed`);
 shim.close();
 redis.kill();

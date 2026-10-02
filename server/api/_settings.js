@@ -10,6 +10,7 @@ export const K = {
   acct: 'mailer:srv:acct',               // hash account -> {paused, reason, at, auto, ...}
   lock: 'mailer:srv:lock',
   lastTick: 'mailer:srv:lastTick',
+  fixItemIds: 'mailer:srv:fix:itemIds',  // set once the shared-name plan repair has run (requeueStranded)
   contacts: 'mailer:srv:contacts',       // hash email -> contact JSON
   queue: 'mailer:srv:queue',             // list of emails waiting for a first email (Regular lane)
   queueOf: (lane) => (lane && lane !== 'regular' ? `mailer:srv:queue:${lane}` : 'mailer:srv:queue'),

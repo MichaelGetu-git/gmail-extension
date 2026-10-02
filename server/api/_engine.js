@@ -478,6 +478,45 @@ export async function invalidatePlans(now, { includeUntouchedToday = true, setti
   return n;
 }
 
+// Contacts marked planned for a day whose plan holds no email for them go back
+// to the front of their lane's queue, oldest first. Plans built while two
+// accounts shared the part before the @ (dawit@a.com, dawit@b.com) gave both
+// the same item ids, so one account's items overwrote the other's: their
+// contacts had left the queue but were in no plan, and would never be sent.
+export async function requeueStranded() {
+  const stranded = [];
+  const held = new Map();   // date -> emails its plan holds a first email for
+  let cursor = '0';
+  do {
+    const [next, flat] = await command('HSCAN', K.contacts, cursor, 'COUNT', 500);
+    cursor = String(next);
+    for (let i = 0; i < (flat || []).length; i += 2) {
+      const c = parse(flat[i + 1]);
+      if (!c?.email || c.status !== 'planned' || !/^\d{4}-\d{2}-\d{2}$/.test(String(c.plannedFor || ''))) continue;
+      if (!held.has(c.plannedFor)) {
+        held.set(c.plannedFor, new Set((await readPlan(c.plannedFor)).items.filter((it) => !it.followUp).map((it) => it.email)));
+      }
+      if (!held.get(c.plannedFor).has(c.email)) stranded.push(c);
+    }
+  } while (cursor !== '0');
+  return releaseItems(stranded.map((c) => ({ email: c.email, followUp: false, status: 'planned', at: c.addedAt || 0 })));
+}
+
+// Once: if accounts share the part before the @, plans built before item ids
+// used the whole address are missing emails. Rebuild the provisional ones,
+// then put their stranded contacts back in the queue.
+async function repairSharedNames(now, config, notes) {
+  if (await command('GET', K.fixItemIds)) return;
+  const names = accountsOf(config).map((a) => a.split('@')[0]);
+  if (new Set(names).size < names.length) await invalidatePlans(now, { includeUntouchedToday: true });
+  const n = await requeueStranded();
+  if (n) {
+    notes.push(`${n} contact(s) left out of a day plan are back in the queue`);
+    await addLog({ status: 'requeued', reason: `${n} contact${n === 1 ? '' : 's'} left out of a day plan (accounts sharing a name before the @) went back to the front of the queue` });
+  }
+  await command('SET', K.fixItemIds, String(now));
+}
+
 export async function ensurePlan(date, { now = Date.now() } = {}) {
   const settings = await readSettings();
   const today = sendingDay(now, settings);
@@ -634,7 +673,9 @@ export async function buildPlan(date, now, settings) {
     meta.accounts[a].start = at;
     list.forEach((it, i) => {
       if (i > 0) at += Math.round((settings.minGapMin + rand() * (settings.maxGapMin - settings.minGapMin)) * 60) * 1000;
-      items.push({ id: `${date}:${a.split('@')[0]}:${i}`, date, account: a, ...it, at, status: 'planned' });
+      // The whole address: accounts can share the part before the @
+      // (dawit@a.com, dawit@b.com), and the id is the plan's hash field.
+      items.push({ id: `${date}:${a}:${i}`, date, account: a, ...it, at, status: 'planned' });
     });
     meta.accounts[a].followUps = list.filter((x) => x.followUp).length;
     meta.accounts[a].fresh = list.length - meta.accounts[a].followUps;
@@ -1027,7 +1068,7 @@ export async function sendTestBatch({ now = Date.now(), only = null, lane = 'reg
     if (n > TEST_DAILY_LIMIT) { await undoCount(); results.push({ ...p, status: 'test limit reached' }); continue; }
     if (!Number(await command('LREM', queueKey, 0, email))) { await undoCount(); results.push({ ...p, status: 'no longer queued' }); continue; }
     await setContact(email, { status: 'planned', plannedFor: `${today} (test batch)` });
-    const item = { id: `${today}:test:${p.account.split('@')[0]}:${now.toString(36)}`, date: today, account: p.account, email,
+    const item = { id: `${today}:test:${p.account}:${now.toString(36)}`, date: today, account: p.account, email,
       template: p.template, followUp: false, touch: 1, company: p.company, at: now, status: 'planned', testBatch: true, ...laneTag(lane) };
     const r = await sendItem(item, { now, today, bypassPause: true });
     await command('EXPIRE', K.plan(today), 40 * 86400);
@@ -1134,7 +1175,7 @@ export async function sendTestFollowUps({ now = Date.now(), only = null, lane = 
     const n = Number(await command('HINCRBY', key, p.account, 1));
     await command('EXPIRE', key, 3 * 86400);
     if (n > TEST_DAILY_LIMIT) { await command('HINCRBY', key, p.account, -1); results.push({ ...p, status: 'test limit reached' }); continue; }
-    const item = { id: `${today}:testfu:${p.account.split('@')[0]}:${now.toString(36)}`, date: today, account: p.account, email,
+    const item = { id: `${today}:testfu:${p.account}:${now.toString(36)}`, date: today, account: p.account, email,
       template: fuTemplate, followUp: true, touch: p.touch, company: p.company, at: now, status: 'planned', testBatch: true, ...laneTag(lane) };
     const r = await sendItem(item, { now, today, bypassPause: true, skipWait: true });
     await command('EXPIRE', K.plan(today), 40 * 86400);
@@ -1162,6 +1203,8 @@ export async function tick({ now = Date.now(), budgetMs = 40000, scan = true } =
     catch (e) { out.notes.push(`unsubscribe sync failed: ${e.message}`); }
     const settings = await readSettings();
     const config = await readConfig();
+    try { await repairSharedNames(now, config, out.notes); }
+    catch (e) { out.notes.push(`plan repair failed: ${e.message}`); }
     const today = sendingDay(now, settings);
     if (settings.paused) out.paused = true;
     else if (!settings.weekdays.includes(eatWeekday(today))) out.notes.push('not a sending day');

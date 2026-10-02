@@ -33,7 +33,11 @@ const EXT_COLOR = '#cbd5e1';
 let ACCOUNTS = [];
 const acctColor = (a) => { const i = ACCOUNTS.indexOf(a); if (i >= 0) return ACCT_PALETTE[i % ACCT_PALETTE.length];
   let h = 0; for (const c of String(a)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return ACCT_PALETTE[h % ACCT_PALETTE.length]; };
-const short = (a) => String(a || '').split('@')[0];
+// The part before the @, unless another account shares it (dawit@a.com, dawit@b.com): then the whole address.
+const short = (a) => {
+  const s = String(a || '').split('@')[0];
+  return ACCOUNTS.filter((x) => x.split('@')[0] === s).length > 1 ? String(a) : s;
+};
 const M = { sent: '#4f46e5', opened: '#f97316', replied: '#10b981', bounced: '#ef4444', unsub: '#a855f7' };
 // Personalised vs standard: a validated pair, always shown with a text label.
 const PZ = '#7c3aed', STD = '#0d9488';
