@@ -790,14 +790,50 @@ export async function bounceRate(account) {
   return { rate: bounced / recent.length, bounced, of: recent.length };
 }
 
+// An account pauses itself on bounces only once they are a real signal: at
+// least 3 bounces AND more than 5% of its last 50 sends. A percentage alone
+// stopped an account on its first bad address (1 bounce in its first 19 sends
+// is already over 5%); with 50 sends, 3 bounces is 6%.
+export const BOUNCE_PAUSE = { rate: 0.05, min: 3 };
+export const bounceTooHigh = (b) => b.bounced >= BOUNCE_PAUSE.min && b.rate > BOUNCE_PAUSE.rate;
+
 async function checkBounceAutoPause(account, now) {
   const b = await bounceRate(account);
-  if (b.rate > 0.05) {
+  if (bounceTooHigh(b)) {
     await patchAccountState(account, { paused: true, auto: true, at: now,
       reason: `bounce rate ${(b.rate * 100).toFixed(1)}% (${b.bounced} of last ${b.of})` });
     return true;
   }
   return false;
+}
+
+// A bounce pause never stops an account for good:
+//  - it lifts as soon as the account's bounces are under the limit above (e.g.
+//    an earlier, stricter rule paused it on one bad address), and
+//  - otherwise it lifts after BOUNCE_RETRY_MS, so the account gets another go;
+//    if it bounces again while still over the limit, the next bounce pauses it
+//    again at once (at most one more bounce per account per day).
+// Its planned sends carry on; future day plans are rebuilt so it gets contacts.
+export const BOUNCE_RETRY_MS = 24 * 3600000;
+async function liftBouncePauses(now, notes) {
+  const states = await readAccountStates();
+  let lifted = 0;
+  for (const [account, st] of Object.entries(states)) {
+    if (!st?.paused || !st.auto || !/^bounce rate/.test(st.reason || '')) continue;
+    const b = await bounceRate(account);
+    const under = !bounceTooHigh(b);
+    if (!under && !(now - (Number(st.at) || 0) >= BOUNCE_RETRY_MS)) continue;
+    await patchAccountState(account, { paused: false, auto: false, at: now, reason: '' });
+    const counts = `${b.bounced} bounce${b.bounced === 1 ? '' : 's'} in the last ${b.of} sends`;
+    const why = under
+      ? `bounce pause lifted: ${counts}, under the limit (${BOUNCE_PAUSE.min} or more bounces and over ${BOUNCE_PAUSE.rate * 100}%)`
+      : `bounce pause lifted after 24 hours (${counts}); another bounce pauses it again`;
+    await addLog({ account, status: 'resumed', reason: why });
+    notes.push(`${account}: ${why}`);
+    lifted++;
+  }
+  if (lifted) await invalidatePlans(now, { includeUntouchedToday: true });
+  return lifted;
 }
 
 async function failureStreak(account, now, n) {
@@ -1201,6 +1237,8 @@ export async function tick({ now = Date.now(), budgetMs = 40000, scan = true } =
     await command('SET', K.lastTick, String(now));
     try { const u = await syncUnsubscribes(); if (u) out.notes.push(`${u} new unsubscribe(s)`); }
     catch (e) { out.notes.push(`unsubscribe sync failed: ${e.message}`); }
+    try { await liftBouncePauses(now, out.notes); }
+    catch (e) { out.notes.push(`bounce pause check failed: ${e.message}`); }
     const settings = await readSettings();
     const config = await readConfig();
     try { await repairSharedNames(now, config, out.notes); }

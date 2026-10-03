@@ -401,26 +401,43 @@ await reset();
 }
 
 // ============================================================ 9. auto-pause
-section('9. auto-pause on SMTP auth errors and bounce rate > 5%');
+section('9. auto-pause on SMTP auth errors, and on bounces only at 3+ and over 5%');
 await reset();
 {
   E.setRandom(mulberry(11));
   await admin('contacts.upload', { csv: makeCsv(60, { prefix: 'a' }) });
   await saveSettings({ paused: false, perAccountCap: 10 });
   sim.behaviour[ACCOUNTS[0]] = 'auth';
-  let rcpt = 0;
-  sim.behaviour[ACCOUNTS[1]] = () => (rcpt++ === 1 ? Object.assign(new Error('550 5.1.1 no such user'), { responseCode: 550, command: 'RCPT TO', response: '550 5.1.1 The email account that you tried to reach does not exist' }) : null);
+  const reject = () => Object.assign(new Error('550 5.1.1 no such user'), { responseCode: 550, command: 'RCPT TO', response: '550 5.1.1 The email account that you tried to reach does not exist' });
+  let rcpt = 0, rcpt3 = 0;
+  sim.behaviour[ACCOUNTS[1]] = () => (rcpt++ === 1 ? reject() : null);          // one bad address
+  sim.behaviour[ACCOUNTS[3]] = () => (rcpt3++ % 2 === 1 ? reject() : null);     // every second address bad
   const date = '2026-09-28';
   for (let t = EAT(date, '08:55'); t <= EAT(date, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
   const st = await S.readAccountStates();
   check('SMTP auth failure auto-pauses that account', st[ACCOUNTS[0]]?.paused && st[ACCOUNTS[0]]?.auto && /SMTP login failed/.test(st[ACCOUNTS[0]].reason));
   check('nothing was sent from the auth-failed account', !sim.sent.some((s) => s.account === ACCOUNTS[0]));
-  check('its contact was not burnt (claim released)', Number(await command('HLEN', S.K.touch)) === sim.sent.length + 1);
-  check('RCPT rejection recorded as bounce and auto-pauses at 1 of 2 (50% > 5%)', st[ACCOUNTS[1]]?.paused && /bounce rate/.test(st[ACCOUNTS[1]].reason), JSON.stringify(st[ACCOUNTS[1]]));
+  check('its contact was not burnt (claim released)', Number(await command('HLEN', S.K.touch)) === sim.sent.length + 4);   // + the 4 bounced sends' claims
+  check('one bounce does not stop an account: it is recorded and sending carries on', !st[ACCOUNTS[1]]?.paused && sim.sent.filter((s) => s.account === ACCOUNTS[1]).length === 9, JSON.stringify(st[ACCOUNTS[1]]));
+  check('the third bounce (over 5%) auto-pauses the account', st[ACCOUNTS[3]]?.paused && st[ACCOUNTS[3]]?.auto && /bounce rate 50\.0% \(3 of last 6\)/.test(st[ACCOUNTS[3]].reason)
+    && sim.sent.filter((s) => s.account === ACCOUNTS[3]).length === 3, JSON.stringify(st[ACCOUNTS[3]]));
   check('other accounts carried on', sim.sent.filter((s) => s.account === ACCOUNTS[2]).length === 10);
   const ov = await admin('overview');
-  const h = ov.json.accounts.find((a) => a.account === ACCOUNTS[1]);
-  check('health shows sends, bounces and auto-pause reason', h.sent7d === 2 && h.bounced7d === 1 && h.autoPaused);
+  const h = ov.json.accounts.find((a) => a.account === ACCOUNTS[1]), h3 = ov.json.accounts.find((a) => a.account === ACCOUNTS[3]);
+  check('health shows sends, bounces and the auto-pause reason', h.sent7d === 10 && h.bounced7d === 1 && !h.autoPaused && h3.bounced7d === 3 && h3.autoPaused);
+  // an account the earlier rule paused on one bounce starts again by itself; one over the limit stays paused
+  await S.patchAccountState(ACCOUNTS[1], { paused: true, auto: true, at: EAT(date, '12:00'), reason: 'bounce rate 50.0% (1 of last 2)' });
+  const tk = await E.tick({ now: EAT(date, '18:30'), scan: false });
+  const st2 = await S.readAccountStates();
+  const lifted = (await admin('log.list', { status: 'resumed' })).json.items;
+  check('the next tick lifts a bounce pause that is under the limit, and says so in the log', !st2[ACCOUNTS[1]].paused && lifted.length === 1 && lifted[0].account === ACCOUNTS[1]
+    && /1 bounce in the last 10 sends/.test(lifted[0].reason) && tk.notes.some((n) => /bounce pause lifted/.test(n)), JSON.stringify({ st: st2[ACCOUNTS[1]], lifted, notes: tk.notes }));
+  check('an account over the limit stays paused (for now)', st2[ACCOUNTS[3]].paused && /bounce rate/.test(st2[ACCOUNTS[3]].reason));
+  const tk2 = await E.tick({ now: EAT('2026-09-29', '18:30'), scan: false });
+  const st3 = await S.readAccountStates();
+  const lifted2 = (await admin('log.list', { status: 'resumed' })).json.items;
+  check('after 24 hours even an account over the limit gets another go, and the log says why', !st3[ACCOUNTS[3]].paused && lifted2.length === 2
+    && /after 24 hours \(3 bounces in the last 6 sends\)/.test(lifted2[0].reason), JSON.stringify({ st: st3[ACCOUNTS[3]], lifted2, notes: tk2.notes }));
   const resume = await admin('account.resume', { account: ACCOUNTS[0] });
   check('admin can resume an auto-paused account', resume.json.state.paused === false);
 }
@@ -748,14 +765,21 @@ section('Send test batch now (flow.testNow): allowlist only, bypasses pause/wind
   const r3 = await admin('flow.testNow', { confirm: T });
   check('only the one free account sends, one email, and the rest wait in the queue', r3.json.sent === 1 && sim.sent.length === before3 + 1 && sim.sent.at(-1).account === ACCOUNTS[3]
     && Number(await command('LLEN', S.K.queue)) === 3 + 5);
-  // a bounce auto-pauses the account (5% rule), and the next click can't use it
+  // a bounce on a test send counts like a real one: with two earlier bounces it
+  // is the third, so the account auto-pauses, and the next click can't use it
   await S.patchAccountState(ACCOUNTS[2], { paused: false, auto: false, reason: '' });
+  const oldBounces = ['old.bounce1@x.example', 'old.bounce2@x.example'];
+  for (const [i, e] of oldBounces.entries()) {
+    await command('HSET', S.K.sent, e, JSON.stringify({ email: e, account: ACCOUNTS[2], touches: [{ at: 1, n: 1, t: `oldbouncetoken0${i}` }], firstSentAt: 1, bouncedAt: 1 }));
+    await command('LPUSH', S.K.recent(ACCOUNTS[2]), e);
+  }
   sim.behaviour[ACCOUNTS[2]] = () => Object.assign(new Error('550 5.1.1 no such user'), { responseCode: 550, command: 'RCPT TO', response: '550 5.1.1 no such user' });
   const r4 = (await admin('flow.testNow', { confirm: T })).json;
   const acc2 = (await S.readAccountStates())[ACCOUNTS[2]];
   check('a bounce on a test send auto-pauses the account like a real send', r4.results.some((x) => x.account === ACCOUNTS[2] && x.status === 'bounced') && acc2.paused && acc2.auto);
   const r5 = (await admin('flow.testNow')).json;
   check('the auto-paused account is not used on the next click', !r5.assign.some((x) => x.account === ACCOUNTS[2]));
+  for (const e of oldBounces) { await command('HDEL', S.K.sent, e); await command('LREM', S.K.recent(ACCOUNTS[2]), 0, e); }
   // the per-account test limit: 10 a day, then that account stops
   sim.behaviour = {};
   await S.patchAccountState(ACCOUNTS[2], { paused: false, auto: false, reason: '' });

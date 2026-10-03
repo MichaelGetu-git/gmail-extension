@@ -43,9 +43,9 @@ const M = { sent: '#4f46e5', opened: '#f97316', replied: '#10b981', bounced: '#e
 const PZ = '#7c3aed', STD = '#0d9488';
 const pzPill = (on) => (on ? ' <span class="pill pz">personalised</span>' : '');
 const STATUS_COLOR = { sent: '#10b981', 'dry-run': '#6366f1', skipped: '#f59e0b', deferred: '#fcd34d', failed: '#ef4444', bounced: '#991b1b',
-  sending: '#2563eb', replied: '#0ea5e9', 'auto-reply': '#a5b4fc', test: '#94a3b8', 'test (dry-run)': '#cbd5e1', 'test failed': '#fca5a5' };
+  sending: '#2563eb', replied: '#0ea5e9', 'auto-reply': '#a5b4fc', resumed: '#34d399', test: '#94a3b8', 'test (dry-run)': '#cbd5e1', 'test failed': '#fca5a5' };
 const statusColor = (s) => STATUS_COLOR[s] || '#94a3b8';
-const pillFor = (s) => (s === 'sent' || s === 'replied' ? 'ok' : /fail|bounce/.test(s) ? 'bad' : ['skipped', 'deferred'].includes(s) ? 'warn' : s === 'planned' || s === 'sending' ? 'info' : '');
+const pillFor = (s) => (s === 'sent' || s === 'replied' || s === 'resumed' ? 'ok' : /fail|bounce/.test(s) ? 'bad' : ['skipped', 'deferred'].includes(s) ? 'warn' : s === 'planned' || s === 'sending' ? 'info' : '');
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ICON = {
   chart: '<svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>',

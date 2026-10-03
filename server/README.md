@@ -126,7 +126,10 @@ its counts match the real import.
   network call; if the function dies mid-send it is never retried.
 - The daily cap is an atomic counter checked per send.
 - An account pauses itself on an SMTP login failure, after 3 failed sends in a
-  row, or when more than 5% of its last 50 sends bounced. Resume it on the
+  row, or when at least 3 of its last 50 sends bounced and that is more than
+  5% (one bad address never stops an account). A bounce pause lifts itself
+  once the account is under that limit, or after 24 hours; if it bounces again
+  while still over the limit it pauses again at once. Resume it on the
   *Sending* tab.
 - **Dry-run** renders and logs everything without sending. **Test send**
   sends one `[TEST]` email from a chosen account to an address you type (works
