@@ -258,7 +258,10 @@ function series(days) {
   const ext = (k) => days.map((d) => rep?.byDay?.[d]?.[k] || 0);
   const srv = (k) => days.map((d) => an?.perDay?.[d]?.[k] || 0);
   const add = (a, b) => a.map((v, i) => v + b[i]);
-  return { sent: add(ext('sent'), srv('sent')), opened: add(ext('opened'), srv('opened')), replied: add(ext('replied'), srv('replied')),
+  // tracked: sends that can register an open (plain-text sends carry no pixel;
+  // analytics from before the split have no tracked count, so all sends count).
+  const srvTracked = days.map((d) => an?.perDay?.[d]?.tracked ?? an?.perDay?.[d]?.sent ?? 0);
+  return { sent: add(ext('sent'), srv('sent')), tracked: add(ext('sent'), srvTracked), opened: add(ext('opened'), srv('opened')), replied: add(ext('replied'), srv('replied')),
     bounced: srv('bounced'), unsub: srv('unsubscribed'), srvSent: srv('sent') };
 }
 const sum = (a, from = 0, to = a.length) => a.slice(from, to).reduce((x, y) => x + y, 0);
@@ -295,6 +298,7 @@ loaders.overview = async () => {
   renderFunnel();
   renderRates();
   renderPipeline();
+  renderLanes();
   accountCards('ovAccounts', 'ov', false);
   const s = ov.settings;
   $('tlCap').textContent = `Planned send times per account, EAT. Accounts start at a random time inside the ${s.windowStart}–${s.windowEnd} window (shaded), then send with ${s.minGapMin}–${s.maxGapMin} minute gaps. No sends after ${s.lateCutoff}.`;
@@ -367,20 +371,22 @@ function pauseBanner(id, compact) {
 function renderKpis() {
   const days = an.days, S = series(days), n = days.length;
   const w = (arr, back) => sum(arr, n - 7 * (back + 1), n - 7 * back);
-  const cur = { sent: w(S.sent, 0), opened: w(S.opened, 0), replied: w(S.replied, 0), bounced: w(S.bounced, 0), unsub: w(S.unsub, 0), srv: w(S.srvSent, 0) };
-  const prev = { sent: w(S.sent, 1), opened: w(S.opened, 1), replied: w(S.replied, 1), bounced: w(S.bounced, 1), unsub: w(S.unsub, 1), srv: w(S.srvSent, 1) };
+  const cur = { sent: w(S.sent, 0), tracked: w(S.tracked, 0), opened: w(S.opened, 0), replied: w(S.replied, 0), bounced: w(S.bounced, 0), unsub: w(S.unsub, 0), srv: w(S.srvSent, 0) };
+  const prev = { sent: w(S.sent, 1), tracked: w(S.tracked, 1), opened: w(S.opened, 1), replied: w(S.replied, 1), bounced: w(S.bounced, 1), unsub: w(S.unsub, 1), srv: w(S.srvSent, 1) };
   const T = an.totals, R = rep || {};
   const contacts = (R.contacts || 0) + T.contacts, emails = (R.emails || 0) + T.emails;
   const tracked = (R.tracked || 0) + (T.trackedContacts ?? T.contacts), opened = (R.opened || 0) + T.openedContacts;   // plain-text sends can't register opens
   const replied = (R.replied || 0) + T.replied, bounced = (R.bounced || 0) + T.bounced, unsub = (R.unsubscribed || 0) + T.unsubscribed;
   const plan = ov.todayPlan, planned = plan.total, done = plan.byStatus.sent || 0;
+  const lanesQ = Object.entries(ov.lanes || {}), waiting = lanesQ.length ? lanesQ.reduce((n, [, l]) => n + (l.queued || 0), 0) : ov.queue.queued;
+  const waitingBy = lanesQ.filter(([, l]) => l.queued).map(([k, l]) => `${fmt(l.queued)} ${LANE_LABEL[k]}`).join(' · ');
   const cards = [
     { k: 'Emails sent', c: M.sent, v: fmt(emails), d: delta(cur.sent, prev.sent), f: rep ? `${fmt(R.emails || 0)} ext · ${fmt(T.emails)} dashboard` : `to ${fmt(T.contacts)} contacts`, spark: S.sent },
-    { k: 'Open rate', c: M.opened, v: pctTxt(rate(opened, tracked), 0), d: delta(rate(cur.opened, cur.sent), rate(prev.opened, prev.sent), { pts: true }), f: `${fmt(opened)} of ${fmt(tracked)} opened`, spark: S.opened },
+    { k: 'Open rate', c: M.opened, v: pctTxt(rate(opened, tracked), 0), d: delta(rate(cur.opened, cur.tracked), rate(prev.opened, prev.tracked), { pts: true }), f: `${fmt(opened)} of ${fmt(tracked)} opened`, spark: S.opened },
     { k: 'Reply rate', c: M.replied, v: pctTxt(rate(replied, contacts)), d: delta(rate(cur.replied, cur.sent), rate(prev.replied, prev.sent), { pts: true }), f: `${fmt(replied)} replied${T.autoReplied ? ` · ${fmt(T.autoReplied)} out-of-office not counted` : ''}`, spark: S.replied },
     { k: 'Bounce rate', c: M.bounced, v: pctTxt(rate(bounced, contacts)), d: delta(rate(cur.bounced, cur.srv), rate(prev.bounced, prev.srv), { pts: true, invert: true }), f: `${fmt(bounced)} contacts`, spark: S.bounced },
     { k: 'Unsubscribed', c: M.unsub, v: fmt(unsub), d: delta(cur.unsub, prev.unsub, { invert: true }), f: 'never emailed again', spark: S.unsub },
-    { k: 'Waiting in queue', c: '#0ea5e9', v: fmt(ov.queue.queued), d: `<span class="delta flat">${fmt(ov.queue.followUpCandidates)}</span>`, f: planned ? `${done} of ${planned} sent today` : 'nothing planned today', progress: planned ? done / planned : 0 },
+    { k: 'Waiting in queue', c: '#0ea5e9', v: fmt(waiting), d: `<span class="delta flat">${fmt(ov.queue.followUpCandidates)}</span>`, f: `${waitingBy ? `${waitingBy} · ` : ''}${planned ? `${done} of ${planned} sent today` : 'nothing planned today'}`, progress: planned ? done / planned : 0 },
   ];
   killPrefix('kp-');
   $('kpis').innerHTML = cards.map((c, i) => `<div class="card kpi"><div class="k"><i style="background:${c.c}"></i>${c.k}</div><div class="v">${c.v}</div>
@@ -409,11 +415,27 @@ function renderSends() {
       scales: { x: axisX({ stacked: true }), y: axisY({ stacked: true }) } } });
 }
 
+// Dashboard sends per lane, from analytics (all time, today, last 7 days)
+// and the overview (accounts, queue).
+function renderLanes() {
+  const A = an.lanes;
+  if (!A) { $('ovLanes').innerHTML = ''; return; }
+  const rows = Object.keys(LANE_LABEL).map((l) => {
+    const x = A[l], L = ov.lanes?.[l] || {}, n = (L.accounts || []).length;
+    return `<tr><td>${lanePill(l) || esc(LANE_LABEL[l])}</td><td class="n">${n ? `${n} · cap ${l === 'regular' ? ov.settings.perAccountCap : L.cap}` : '<span class="sub">none</span>'}</td>
+      <td class="n">${fmt(x.today)}</td><td class="n">${fmt(x.last7d)}</td><td class="n">${fmt(x.emails)} <span class="sub">to ${fmt(x.contacts)}</span></td>
+      <td class="n">${fmt(x.replied)} <span class="sub">${pctTxt(rate(x.replied, x.contacts))}</span></td><td class="n">${fmt(x.bounced)} <span class="sub">${pctTxt(rate(x.bounced, x.contacts))}</span></td>
+      <td class="n">${fmt(L.queued || 0)}</td></tr>`;
+  });
+  $('ovLanes').innerHTML = '<tr><th>Lane</th><th class="n">Accounts</th><th class="n">Sent today</th><th class="n">Last 7 days</th><th class="n">All time</th><th class="n">Replied</th><th class="n">Bounced</th><th class="n">Waiting</th></tr>' + rows.join('');
+}
+
 function renderFunnel() {
   const T = an.totals, R = rep || {};
   const contacts = (R.contacts || 0) + T.contacts, opened = (R.opened || 0) + T.openedContacts, replied = (R.replied || 0) + T.replied;
+  const tracked = (R.tracked || 0) + (T.trackedContacts ?? T.contacts);   // plain-text sends can't register opens
   if (!contacts) { $('funnel').innerHTML = `<div class="empty" style="min-height:220px">${ICON.chart}<b>No contacts emailed yet</b><span>The funnel fills in as emails go out.</span></div>`; return; }
-  const steps = [['Emailed', contacts, M.sent, ''], ['Opened', opened, M.opened, `${pctTxt(rate(opened, contacts), 0)} of emailed`], ['Replied', replied, M.replied, `${pctTxt(rate(replied, contacts))} of emailed · ${pctTxt(rate(replied, opened))} of opened`]];
+  const steps = [['Emailed', contacts, M.sent, ''], ['Opened', opened, M.opened, `${pctTxt(rate(opened, tracked), 0)} of ${tracked < contacts ? `the ${fmt(tracked)} tracked` : 'emailed'}`], ['Replied', replied, M.replied, `${pctTxt(rate(replied, contacts))} of emailed · ${pctTxt(rate(replied, opened))} of opened`]];
   $('funnel').innerHTML = `<div class="funnel">${steps.map(([l, v, c, conv]) => `<div class="step"><div class="top"><span>${l}</span><b>${fmt(v)}</b></div>
     <div class="bar"><div style="width:${Math.max(1, (v / contacts) * 100).toFixed(1)}%;background:linear-gradient(90deg, ${c}, ${hexA(c, 0.75)})"></div></div>${conv ? `<div class="conv">${conv}</div>` : ''}</div>`).join('')}</div>
     <p class="cap" style="margin:16px 0 0">Opens are only measurable where the logo loads; replies are exact.</p>`;
@@ -421,7 +443,7 @@ function renderFunnel() {
 
 function renderRates() {
   const days = an.days, S = series(days);
-  const lines = [['Open rate', rolling(S.opened, S.sent), M.opened], ['Reply rate', rolling(S.replied, S.sent), M.replied],
+  const lines = [['Open rate', rolling(S.opened, S.tracked), M.opened], ['Reply rate', rolling(S.replied, S.sent), M.replied],
     ['Bounce rate', rolling(S.bounced, S.srvSent), M.bounced], ['Unsubscribe rate', rolling(S.unsub, S.srvSent), M.unsub]];
   legend('ratesLegend', lines.map(([l, , c]) => [c, l]));
   if (!lines.some(([, d]) => d.some((v) => v != null))) return empty('chRates', 'No rates yet', 'Rates appear once emails have been sent in the last 30 days.');
@@ -532,7 +554,7 @@ function renderSegPerf() {
   const segs = ['callcenter', 'tech', 'va', 'other'];
   const rows = segs.map((s) => {
     const e = rep?.bySegment?.[s] || {}, v = an.segments[s] || {};
-    const contacts = (e.contacts || 0) + (v.contacts || 0), tracked = (e.tracked || 0) + (v.contacts || 0);
+    const contacts = (e.contacts || 0) + (v.contacts || 0), tracked = (e.tracked || 0) + (v.tracked ?? v.contacts ?? 0);
     return { s, contacts, open: rate((e.opened || 0) + (v.opened || 0), tracked), reply: rate((e.replied || 0) + (v.replied || 0), contacts) };
   }).filter((r) => r.contacts);
   $('segPerfT').innerHTML = rows.length ? '<tr><th>Segment</th><th class="n">Contacts</th><th class="n">Open rate</th><th class="n">Reply rate</th></tr>' + rows.map((r) =>
@@ -612,10 +634,27 @@ function replyHealth(id) {
 }
 
 let rpKind = 'replies';
+// Telegram reply notices: set up or not, who gets them, what waits.
+async function tgBox() {
+  let t;
+  try { t = await api('telegram.status'); } catch { $('tgStatus').innerHTML = ''; return; }
+  const who = t.targets.map((x) => (/^-?\d+$/.test(x) ? x : `@${x}`)).join(', ');
+  $('tgStatus').innerHTML = !t.configured
+    ? `<div class="msg warn"><span>Not set up. Add <code>TELEGRAM_BOT_TOKEN</code> (from @BotFather) in Vercel and redeploy; notices go to ${esc(who)} (<code>TELEGRAM_NOTIFY</code> to change), who must send <b>/start</b> to the bot once.</span></div>`
+    : t.error ? `<div class="msg bad"><span>${esc(t.error)}</span></div>`
+    : `<div class="kv" style="font-size:12.5px"><span>Sends to</span><span>${esc(who)}${t.missing?.length ? ` <span class="pill warn">${t.missing.map((m) => `@${esc(m)}`).join(', ')}: send /start to the bot</span>` : ' <span class="pill ok">connected</span>'}</span>
+       <span>Waiting</span><span>${fmt(t.pending)} repl${t.pending === 1 ? 'y' : 'ies'} for the next notice</span><span>Last notice</span><span>${t.lastAt ? when(t.lastAt) : 'none yet'}</span></div>`;
+  $('tgTest').disabled = !t.configured;
+}
+$('tgTest').onclick = async () => {
+  try { const r = await api('telegram.test'); toast(`Test sent to ${r.sent} chat${r.sent === 1 ? '' : 's'}`); tgBox(); }
+  catch (e) { if (e instanceof AuthError) return handleErr(e); toast(e.message); }
+};
 loaders.replies = async () => {
   const [o, r] = await Promise.all([api('overview'), api('replies.list', { kind: rpKind, q: $('rpQ').value, limit: 500 })]);
   ov = o; ACCOUNTS = ov.accounts.map((x) => x.account); sideStatus();
   replyHealth('rpHealth');
+  tgBox();
   renderReplies('rpT', r.items);
   const noun = rpKind === 'auto' ? 'out-of-office auto-replies' : rpKind === 'all' ? 'replies and auto-replies' : `${r.matched === 1 ? 'person' : 'people'} replied`;
   const checked = inboxesChecked();
@@ -930,6 +969,7 @@ loaders.queue = async () => {
     (f.items.length ? f.items.map((x) => `<tr><td>${esc(x.dueDate)}</td><td>${esc(goes(x) < today ? today : goes(x))}</td><td>${esc(x.email)}<div class="sub">${esc(x.company)}</div></td><td><span class="dot" style="background:${acctColor(x.account)};margin-right:6px"></span>${esc(short(x.account))}</td><td class="n">${x.touches}</td></tr>`).join('')
       : '<tr><td colspan="5" class="sub">No follow-ups due in the next 7 days.</td></tr>');
   const shown = q.filter === 'all' ? '' : ` · showing ${q.filter === 'personal' ? 'personalised' : 'standard'} only (${fmt(q.matched)})`;
+  heldBox('regular', 'qHeld');
   $('qCap').textContent = `${fmt(q.total)} contacts waiting, oldest first${shown}${q.matched > q.items.length ? `, first ${q.items.length} shown` : ''}`;
   $('qFilter').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.f === qFilterSel));
   const cov = rate(q.personal, q.total);
@@ -1424,15 +1464,17 @@ $('pgGo').onclick = async () => {
 let leadLane = 'work';
 const TPL_FIRST_CHOICES = [['auto', 'Auto: route by CSV, like Regular'], ...TPL.filter(([id]) => id !== 'followup'), ['custom', "This lane's own template"]];
 loaders.leads = async () => {
-  const [o, q] = await Promise.all([api('overview'), api('queue.list', { lane: leadLane }), loadUploadFormat()]);
-  ov = o; ACCOUNTS = ov.accounts.map((x) => x.account); sideStatus();
-  const L = ov.lanes[leadLane], label = LANE_LABEL[leadLane];
+  const [o, q, a] = await Promise.all([api('overview'), api('queue.list', { lane: leadLane }), api('analytics'), loadUploadFormat()]);
+  ov = o; an = a; ACCOUNTS = ov.accounts.map((x) => x.account); sideStatus();
+  const L = ov.lanes[leadLane], label = LANE_LABEL[leadLane], X = an.lanes?.[leadLane];
   $('laneWhich').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.lane === leadLane));
   const accts = ov.accounts.filter((a) => a.lane === leadLane);
   $('laneStatus').innerHTML = (accts.length
     ? `<div class="msg ok"><span><b>${label} lane sends from:</b> ${accts.map((a) => `${esc(a.account)} ${!a.hasPassword ? `<span class="pill bad">no app password (${esc(a.passwordVar)})</span>` : a.paused ? '<span class="pill warn">paused</span>' : '<span class="pill ok">ready</span>'}`).join(' · ')}</span></div>`
     : `<div class="msg bad"><span><b>No account assigned to the ${label} lane.</b> Nothing in this lane will be sent, and it never falls back to the Regular accounts. Add or move an account under Sending → Accounts (Lane column, or "Add a sending account").</span></div>`)
-    + `<div class="kv" style="margin-top:10px;font-size:12.5px"><span>Waiting</span><span>${fmt(L.queued)} lead${L.queued === 1 ? '' : 's'} in the ${label} queue</span>
+    + `<div class="kv" style="margin-top:10px;font-size:12.5px">${X ? `<span>Sent</span><span><b>${fmt(X.today)}</b> today · ${fmt(X.last7d)} in the last 7 days · ${fmt(X.emails)} all time to ${fmt(X.contacts)} lead${X.contacts === 1 ? '' : 's'}</span>
+       <span>Results</span><span>${fmt(X.replied)} replied (${pctTxt(rate(X.replied, X.contacts))})${X.autoReplied ? ` · ${fmt(X.autoReplied)} out-of-office` : ''} · ${fmt(X.bounced)} bounced · ${fmt(X.unsubscribed)} unsubscribed</span>` : ''}
+       <span>Waiting</span><span>${fmt(L.queued)} lead${L.queued === 1 ? '' : 's'} in the ${label} queue</span>
        <span>Format</span><span>${L.plainText ? 'Plain text (no footer, no tracking) · opens are not tracked' : 'HTML with footer, logo and open tracking (like Regular)'}</span>
        <span>Daily cap</span><span>${L.cap} per account · window, gaps and sending days come from Sending → Schedule and safety</span>
        <span>Server sending</span><span>${ov.settings.paused ? '<span class="pill warn">paused (global)</span>' : '<span class="pill ok">on</span>'}</span></div>`;
@@ -1440,12 +1482,33 @@ loaders.leads = async () => {
   $('lOptTitle').textContent = `Sending options: ${label} lane`; $('lTestTitle').textContent = `Test batch: ${label} lane`;
   $('lQTitle').textContent = `Waiting in the ${label} lane`; $('lQClear').textContent = `Clear the ${label} queue`;
   fillLaneForm(L);
+  heldBox(leadLane, 'lHeld');
   $('lQCap').textContent = `${fmt(q.total)} lead${q.total === 1 ? '' : 's'} waiting for a first email, oldest first${q.total > q.items.length ? ` (first ${q.items.length} shown)` : ''}`;
   $('lQueue').innerHTML = '<tr><th>#</th><th>Recipient</th><th>Name</th><th>Company</th><th>Template</th><th>Added</th><th></th></tr>' +
     (q.items.length ? q.items.map((x, i) => `<tr><td class="sub">${i + 1}</td><td>${esc(x.email)}</td><td>${esc(x.name)}</td><td>${esc(x.company)}</td>
       <td>${esc(TPL_LABEL[x.template] || x.template)}</td><td>${when(x.addedAt)}</td><td class="n"><button class="btn small ghost" data-lrm="${esc(x.email)}">Remove</button></td></tr>`).join('')
       : `<tr><td colspan="7" style="border:0;padding:0"><div class="empty" style="min-height:110px">${ICON.inbox}<b>No ${label} leads waiting</b><span>Upload a CSV above.</span></div></td></tr>`);
 };
+// Contacts held back at send time for a placeholder problem have left the
+// queue; this says how many, how many render cleanly now, and puts those back.
+async function heldBox(lane, id) {
+  const el = $(id); if (!el) return;
+  let h;
+  try { h = await api('contacts.held', { lane }); } catch { el.innerHTML = ''; return; }
+  const still = Object.entries(h.still || {}), nStill = still.reduce((s, [, n]) => s + n, 0);
+  if (!h.ready && !nStill) { el.innerHTML = ''; return; }
+  const label = LANE_LABEL[lane];
+  el.innerHTML = `<div class="msg warn" style="margin-bottom:12px"><span><b>${fmt(h.ready + nStill)} held back</b> for a placeholder problem and out of the ${label} queue.
+    ${h.ready ? `${fmt(h.ready)} render cleanly with the templates as they are now.` : 'None of them render cleanly yet: fix the template (or the list) first.'}
+    ${nStill ? `Still a problem for ${still.map(([k, n]) => `${fmt(n)} (${esc(k)})`).join(', ')}.` : ''}</span>
+    ${h.ready ? `<button class="btn small" data-requeue-held>Put ${fmt(h.ready)} back in the queue</button>` : ''}</div>`;
+  const b = el.querySelector('[data-requeue-held]');
+  if (b) b.onclick = async () => {
+    if (!confirm(`Put ${h.ready} held ${label} contact${h.ready === 1 ? '' : 's'} back at the front of the ${label} queue?\n\nThey go out in the next plans. Anyone held for a problem the templates still have stays held.`)) return;
+    try { const r = await api('contacts.requeueHeld', { lane }); toast(`${r.requeued} back in the ${label} queue${r.suppressed ? `, ${r.suppressed} now suppressed` : ''}`); reload(); }
+    catch (e) { handleErr(e); }
+  };
+}
 function fillLaneForm(L) {
   $('lPlain').checked = L.plainText; $('lOpt').checked = L.optOutLine; $('lOptText').value = L.optOutText; $('lFu').checked = L.followUps;
   $('lCap').value = L.cap;
@@ -1503,6 +1566,20 @@ const upLeads = makeUploader($('upLeads'), { lane: () => leadLane, onImported: (
 $('lTbGo').onclick = () => runTestBatch(leadLane, 'lTbStatus', 'lTbOut');
 $('lTfGo').onclick = () => runTestFollowUp(leadLane, 'lTbStatus', 'lTbOut');
 $('lQueue').onclick = async (e) => { const rm = e.target.dataset.lrm; if (rm && confirm(`Remove ${rm} from the ${LANE_LABEL[leadLane]} queue?`)) { try { await api('queue.remove', { email: rm }); reload(); } catch (err) { handleErr(err); } } };
+// A list uploaded mid-day otherwise waits behind the contacts today's started
+// plan already holds; this hands those sends (same accounts, same times) to
+// the front of the queue, and the replaced contacts go to the back.
+$('lQSwap').onclick = async () => {
+  const label = LANE_LABEL[leadLane];
+  if (!confirm(`Send today's remaining ${label} first emails to the leads at the front of the ${label} queue?
+
+Same accounts and times. The leads they were planned for go to the back of the queue. Follow-ups are not touched.`)) return;
+  try {
+    const d = await api('plan.swapToday', { lane: leadLane });
+    toast(d.planned ? `${d.swapped} of today's ${d.planned} planned ${label} emails now go to the queue's front${d.notSwapped ? ` (${d.notSwapped} kept: queue ran out)` : ''}` : `No ${label} first emails left to send today`);
+    reload();
+  } catch (e) { handleErr(e); }
+};
 $('lQClear').onclick = async () => { if (confirm(`Remove every waiting lead from the ${LANE_LABEL[leadLane]} lane? The other lanes are not touched.`)) { try { const d = await api('queue.clear', { lane: leadLane }); toast(`${d.removed} removed`); reload(); } catch (e) { handleErr(e); } } };
 
 // ---------------------------------------------------------------- boot

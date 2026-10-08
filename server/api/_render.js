@@ -117,10 +117,24 @@ export function routeContact(row) {
   return (SEGMENTS.find((s) => s.match.test(haystack)) || {}).id || DEFAULT_SEGMENT;
 }
 
+// {{first_name}} for a row without one: the first word of a person's full
+// name ("Nicholas Hartigan" -> "Nicholas"; not a company name), else "there",
+// so "Hi {{first_name}}," reads "Hi there," instead of holding the email back.
+export function firstNameFor(c) {
+  const own = String(c.first_name ?? '').trim();
+  if (own) return own;
+  const name = String(c.name ?? '').trim(), words = name.split(/\s+/);
+  const w = words[0] || '';
+  if (words.length >= 2 && name.toLowerCase() !== String(c.company ?? '').trim().toLowerCase()
+    && /^[A-Za-zÀ-ɏ'-]{2,}$/.test(w) && w !== w.toUpperCase()) return w[0].toUpperCase() + w.slice(1);
+  return 'there';
+}
+
 export function withWording(c) {
   const d = DEFAULT_WORDING[c._segment || routeContact(c)] || DEFAULT_WORDING.callcenter;
   return {
     ...c,
+    first_name: firstNameFor(c),
     business_type: String(c.business_type || '').trim() || d.business_type,
     pain: String(c.pain || '').trim() || d.pain,
     // {{sender_name}}: the account's name exactly as set ("Dawit @ ZemenayTech").

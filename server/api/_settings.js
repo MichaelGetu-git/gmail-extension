@@ -28,6 +28,9 @@ export const K = {
   logBody: 'mailer:srv:logbody',         // hash log id -> {subject, text, html}
   replies: 'mailer:srv:replies',         // list of detected replies and auto-replies (newest first, last 500)
   lastReply: 'mailer:srv:lastReplyAt',   // ms of the newest real reply, for the dashboard's "new replies" badge
+  tgPending: 'mailer:srv:tg:pending',    // list: real replies not yet sent to Telegram (oldest first)
+  tgLast: 'mailer:srv:tg:last',          // ms of the last Telegram notice
+  tgChats: 'mailer:srv:tg:chats',        // hash lowercased username -> Telegram chat id
   suppEmails: 'mailer:srv:supp:emails',  // set
   suppDomains: 'mailer:srv:supp:domains',// set
   optout: 'mailer:srv:optout',           // set: unsubscribed / never email again (applies to follow-ups too)

@@ -7,7 +7,7 @@
 // Nothing here ever returns or logs an app password; only whether one is set.
 import { command, configured } from './_store.js';
 import { body, isAdmin, send, teamCors } from './_auth.js';
-import { readConfig, cleanConfig, saveConfig, HISTORY_KEY } from './config.js';
+import { readConfig, cleanConfig, saveConfig, HISTORY_KEY, MAX_SENDERS } from './config.js';
 import {
   K, readSettings, writeSettings, cleanSettings, readAccountStates, patchAccountState,
   hasPassword, passwordVar, mailServer, serverVar, eatWeekday, nextWeekday, sendingDay, CAP_MAX,
@@ -17,9 +17,10 @@ import {
   withLock, uploadContacts, queueView, removeFromQueue, clearQueue, ensurePlan, readPlan, invalidatePlans,
   listLog, getLogBody, addLog, health, followUpsDue, scanAccount, scanAll, tick, accountsOf, testBatchPlan, sendTestBatch, testFollowUpPlan, sendTestFollowUps,
   laneAccounts, runStatus, testCountKey, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, senderOf, previewContact,
-  CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES,
+  CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES, heldContacts, requeueHeld, swapTodayPlanned,
 } from './_engine.js';
 import { checkOne, importLists, counts as suppCounts, isRoleAddress } from './_suppress.js';
+import { tgConfigured, tgTargets, resolveChats, sendTelegram, NOTIFY_EVERY_MIN } from './_telegram.js';
 import { renderEmail, routeContact, newToken, normEmail, EMAIL_RE, TEMPLATE_IDS, SEGMENTS } from './_render.js';
 import { transportFor } from './_smtp.js';
 import { analytics } from './_analytics.js';
@@ -136,7 +137,7 @@ const actions = {
       const prev = await readConfig();
       const exists = prev.senders[a] !== undefined;
       if (!exists) {
-        if (Object.keys(prev.senders).length >= 20) throw bad('20 sending accounts is the limit');
+        if (Object.keys(prev.senders).length >= MAX_SENDERS) throw bad(`${MAX_SENDERS} sending accounts is the limit`);
         const next = cleanConfig({ ...prev, senders: { ...prev.senders, [a]: String(b.name || '').trim() } }, prev);
         await saveConfig(next, prev);
       }
@@ -213,6 +214,9 @@ const actions = {
     return { plan, today };
   },
 
+  // Today's first emails still planned in a lane go to the next contacts in
+  // its queue instead (same accounts and times); the replaced ones go to the back.
+  async 'plan.swapToday'(b) { return withLock(() => swapTodayPlanned(normLane(b.lane), Date.now())); },
   async 'plan.rebuild'(b) {
     const now = Date.now();
     return withLock(async () => {
@@ -268,6 +272,14 @@ const actions = {
     return withLock(async () => ({ removed: await removeFromQueue(b.email), invalidated: await invalidatePlans(Date.now()) }));
   },
   async 'queue.clear'(b) { return withLock(async () => { await invalidatePlans(Date.now()); return { lane: normLane(b.lane), removed: await clearQueue(normLane(b.lane)) }; }); },
+  // Contacts held back for a placeholder problem, in one lane: how many render
+  // cleanly with the templates as they are now, and what the rest still lack.
+  async 'contacts.held'(b) {
+    const h = await heldContacts(normLane(b.lane));
+    return { lane: h.lane, ready: h.ready.length, still: h.still, sample: h.ready.slice(0, 5).map((c) => c.email) };
+  },
+  // Put the ones that render cleanly now back at the front of the lane's queue.
+  async 'contacts.requeueHeld'(b) { return withLock(() => requeueHeld(normLane(b.lane), Date.now())); },
   async 'contacts.requeue'(b) {
     const e = normEmail(b.email);
     return withLock(async () => {
@@ -381,6 +393,20 @@ const actions = {
   async 'scan.all'() { return withLock(() => scanAll(Date.now()), { waitMs: 15000 }); },
   async 'replies.list'(b) { return listReplies({ kind: ['replies', 'auto', 'all'].includes(b.kind) ? b.kind : 'replies', q: b.q || '', limit: b.limit }); },
   async 'replies.latest'() { return latestReplies(20); },
+  // Telegram reply notices: whether the bot is set up, who gets them (and who
+  // still has to /start the bot), how many replies wait for the next notice.
+  async 'telegram.status'() {
+    const base = { configured: tgConfigured(), targets: tgTargets(), everyMin: NOTIFY_EVERY_MIN,
+      pending: Number(await command('LLEN', K.tgPending)) || 0, lastAt: Number(await command('GET', K.tgLast)) || null };
+    if (!base.configured) return base;
+    try { const r = await resolveChats(); return { ...base, connected: r.chats.length, missing: r.missing }; }
+    catch (e) { return { ...base, error: String(e.message || e).slice(0, 200) }; }
+  },
+  async 'telegram.test'() {
+    if (!tgConfigured()) throw bad('TELEGRAM_BOT_TOKEN is not set in Vercel');
+    try { return await sendTelegram('✅ Zemenay Outreach: reply notices are on. New replies arrive here, at most every 30 minutes.'); }
+    catch (e) { throw bad(String(e.message || e).slice(0, 200)); }
+  },
 
   // "Send test batch now": preview (no confirm) lists exactly who would get an
   // email from which account; with confirm: [emails] it sends one per account,

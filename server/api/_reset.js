@@ -1,14 +1,14 @@
 // data.reset — empty the dashboard's sending data, keep every setting.
 //
 // Wiped: contacts, queue (every lane's), day plans, the send log and its bodies, per-recipient
-// send records and tokens, the replies feed, the never-twice guard, follow-up rotation, per-account
+// send records and tokens, the replies feed and its pending Telegram notice, the never-twice guard, follow-up rotation, per-account
 // history/recent/last-send, daily attempt counters and test-send counters, and
 // the open records that belong to server-sent mail (server tokens, test-send
 // tokens from the log) or to junk timing probes (zzjunkzz…).
 //
 // Kept: settings (pause, footer, …), templates/config and their history, sender
 // accounts and their states, every suppression source (imported lists, opt-outs,
-// the extension's history, claimed leads, unsubscribes), the extension's reports
+// the extension's history, claimed leads, unsubscribes), the Telegram chat ids, the extension's reports
 // and the extension's own open records, the lock, the last-tick time, earlier
 // backups, and anything under mailer: this file does not recognise.
 //
@@ -17,11 +17,11 @@
 import { command } from './_store.js';
 import { K } from './_settings.js';
 
-export const WIPE_EXACT = [K.contacts, K.queue, K.sent, K.tokens, K.touch, K.fu, K.plans, K.log, K.logBody, K.replies, K.lastReply];
+export const WIPE_EXACT = [K.contacts, K.queue, K.sent, K.tokens, K.touch, K.fu, K.plans, K.log, K.logBody, K.replies, K.lastReply, K.tgPending, K.tgLast];
 export const WIPE_PREFIX = ['mailer:srv:plan:', 'mailer:srv:count:', 'mailer:srv:byacct:', 'mailer:srv:recent:',
   'mailer:srv:last:', 'mailer:srv:tests:', 'mailer:srv:queue:'];   // queue: = the Work and Hot lane queues
 export const KEEP_EXACT = [K.settings, K.acct, K.lock, K.lastTick, K.fixItemIds, 'mailer:config', K.configHistory, K.suppEmails,
-  K.suppDomains, K.optout, K.extContacted, K.unsubSeen, K.leadsClaimed, 'mailer:leads:queue', 'mailer:reports', 'mailer:unsub'];
+  K.suppDomains, K.optout, K.extContacted, K.unsubSeen, K.leadsClaimed, 'mailer:leads:queue', 'mailer:reports', 'mailer:unsub', K.tgChats];
 export const KEEP_PREFIX = ['mailer:backup:', 'mailer:claims:'];
 export const OPENS_KEY = 'mailer:opens';
 export const JUNK_TOKEN = /^zzjunkzz/;

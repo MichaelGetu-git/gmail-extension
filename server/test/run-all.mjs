@@ -4,13 +4,15 @@
 // leaves this machine.
 //
 //   cd server && npm test        (needs redis-server on PATH)
+//   TEST_REDIS_PORT=6379 npm test   (an empty Redis already running, e.g. in Docker)
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import nodemailer from 'nodemailer';
 import { startShim } from './upstash-shim.mjs';
 
-const REDIS_PORT = 6390 + Math.floor(Math.random() * 500);
-const redis = spawn('redis-server', ['--port', String(REDIS_PORT), '--save', '', '--appendonly', 'no'], { stdio: 'ignore' });
+const REDIS_PORT = Number(process.env.TEST_REDIS_PORT) || 6390 + Math.floor(Math.random() * 500);
+const redis = process.env.TEST_REDIS_PORT ? { kill() {} }
+  : spawn('redis-server', ['--port', String(REDIS_PORT), '--save', '', '--appendonly', 'no'], { stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 400));
 const shim = await startShim({ redisPort: REDIS_PORT, token: 'test-token' });
 
@@ -1058,6 +1060,12 @@ await reset();
   check('send record keeps the lane and marks touches plain (no open possible)', recW.lane === 'work' && recW.touches[0].plain === true && recW.account === WORK);
   const an = (await admin('analytics')).json;
   check('analytics: plain sends counted as untracked for open rates', an.totals.plainEmails === 5 && an.totals.trackedContacts === an.totals.contacts - 5, JSON.stringify(an.totals));
+  const AL = an.lanes, pd = an.perDay[d1];
+  check('analytics: per-lane sends (Work 3, Hot 2, Regular the rest) add up to the totals',
+    AL.work.emails === 3 && AL.work.contacts === 3 && AL.hot.emails === 2 && AL.hot.contacts === 2
+    && AL.regular.emails + AL.work.emails + AL.hot.emails === an.totals.emails, JSON.stringify(AL));
+  check('analytics: per-day and per-segment tracked counts leave out plain sends', pd.tracked === pd.sent - 5
+    && Object.values(an.segments).reduce((n, g) => n + g.tracked, 0) === an.totals.trackedContacts, JSON.stringify(pd));
   const hl = (await admin('overview')).json.accounts;
   check('account health shows lane, plain flag and the lane cap', hl.find((a) => a.account === WORK).lane === 'work' && hl.find((a) => a.account === WORK).plainText && hl.find((a) => a.account === WORK).cap === 3
     && hl.find((a) => a.account === ACCOUNTS[0]).lane === 'regular' && hl.find((a) => a.account === ACCOUNTS[0]).cap === 5);
@@ -1339,6 +1347,62 @@ await reset();
   check('our own copy and unrelated threads are not replies', !(await rec(Z)).repliedAt);
   const an = (await admin('analytics')).json;
   check('analytics: 4 replied, 1 auto-reply outside the reply rate', an.totals.replied === 4 && an.totals.autoReplied === 1, JSON.stringify(an.totals));
+
+  // Telegram notices: the 4 real replies wait for the next notice; the out-of-office does not.
+  const TG = await import('../api/_telegram.js');
+  const pend = (await command('LRANGE', S.K.tgPending, 0, -1)).map((x) => JSON.parse(x));
+  check('telegram: the 4 real replies wait for a notice, the out-of-office does not', pend.length === 4 && !pend.some((p) => p.email === C)
+    && pend.every((p) => p.account && p.subject && 'company' in p), JSON.stringify(pend[0]));
+  check('telegram: without a bot token nothing is sent and the replies keep waiting', (await TG.notifyReplies(EAT('2026-10-20', '11:00'))) === null
+    && Number(await command('LLEN', S.K.tgPending)) === 4 && (await admin('telegram.status')).json.configured === false);
+  const realFetch = globalThis.fetch, tgCalls = [];
+  let tgFail = false;
+  globalThis.fetch = async (url, opt) => {
+    const m = String(url).match(/^https:\/\/api\.telegram\.org\/bot([^/]+)\/(\w+)$/);
+    if (!m) return realFetch(url, opt);
+    const body = JSON.parse(opt.body || '{}');
+    tgCalls.push({ token: m[1], method: m[2], body });
+    if (tgFail) return new Response(JSON.stringify({ ok: false, description: 'Forbidden: bot was blocked by the user' }), { status: 403 });
+    const result = m[2] === 'getUpdates' ? [{ update_id: 1, message: { from: { username: 'someone_else' }, chat: { id: 99, type: 'private' } } },
+      { update_id: 2, message: { from: { username: 'St_Miki' }, chat: { id: 4242, type: 'private' } } }] : { message_id: 7 };
+    return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+  };
+  process.env.TELEGRAM_BOT_TOKEN = 'test-bot-token';
+  const n1 = await TG.notifyReplies(EAT('2026-10-20', '11:00'));
+  const sm = tgCalls.filter((c) => c.method === 'sendMessage');
+  check('telegram: @st_miki is found from the bot\'s updates and gets one message listing the 4 replies (not the out-of-office)',
+    n1?.notified === 4 && sm.length === 1 && sm[0].body.chat_id === '4242' && sm[0].token === 'test-bot-token' && /4 new replies/.test(sm[0].body.text)
+    && [A, B, D, TESTERS[0]].every((e) => sm[0].body.text.includes(e)) && !sm[0].body.text.includes(C) && sm[0].body.text.includes(colleague), sm[0]?.body.text);
+  check('telegram: sent replies leave the waiting list; the chat id is remembered', Number(await command('LLEN', S.K.tgPending)) === 0
+    && (await command('HGET', S.K.tgChats, 'st_miki')) === '4242');
+  await command('RPUSH', S.K.tgPending, JSON.stringify({ email: 'late@x.example', account: rA.account, subject: 'Re: hi', at: 1 }));
+  const before30 = tgCalls.length;
+  check('telegram: a reply found 20 minutes later waits for the 30-minute mark', (await TG.notifyReplies(EAT('2026-10-20', '11:20'))) === null && tgCalls.length === before30);
+  tgFail = true;
+  const nf = await TG.notifyReplies(EAT('2026-10-20', '11:31'));
+  check('telegram: a failed send keeps the reply waiting', nf?.error && /blocked/.test(nf.error) && Number(await command('LLEN', S.K.tgPending)) === 1);
+  tgFail = false;
+  const n2 = await TG.notifyReplies(EAT('2026-10-20', '11:32'));
+  check('telegram: the next try sends it, without asking for updates again', n2?.notified === 1 && !tgCalls.slice(before30).some((c) => c.method === 'getUpdates')
+    && /1 new reply\n/.test(tgCalls.at(-1).body.text));
+  const tgs = (await admin('telegram.status')).json, tt = await admin('telegram.test');
+  check('telegram.status / telegram.test through the admin API', tgs.configured && tgs.connected === 1 && !tgs.missing.length && tgs.pending === 0 && tgs.targets.join() === 'st_miki'
+    && tt.status === 200 && tt.json.sent === 1 && !JSON.stringify(tgs).includes('test-bot-token'), JSON.stringify(tgs));
+  // A bot another app uses by webhook (Tempzen's): no username lookup, a numeric chat id works.
+  await command('DEL', S.K.tgChats);
+  const hookFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opt) => (/\/getUpdates$/.test(String(url))
+    ? new Response(JSON.stringify({ ok: false, error_code: 409, description: "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first" }), { status: 409 })
+    : hookFetch(url, opt));
+  const hs = (await admin('telegram.status')).json;
+  check('telegram: a webhook bot (Tempzen\'s) says to use the numeric chat id, and never deletes the webhook', /numeric chat id/.test(hs.error || '')
+    && !tgCalls.some((c) => c.method === 'deleteWebhook'), JSON.stringify(hs));
+  process.env.TELEGRAM_NOTIFY = '4242';
+  const nCalls = tgCalls.length, ht = await admin('telegram.test');
+  check('telegram: with TELEGRAM_NOTIFY = the chat id it sends through that bot', ht.status === 200 && tgCalls.slice(nCalls).map((c) => `${c.method}:${c.body.chat_id}`).join() === 'sendMessage:4242', ht.raw);
+  delete process.env.TELEGRAM_NOTIFY;
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  globalThis.fetch = realFetch;
   const rl = (await admin('replies.list')).json;
   check('replies.list: who, when, account, template, touch, subject; newest first', rl.items.length === 4 && rl.total === 4
     && rl.items.map((x) => x.email).join() === [TESTERS[0], D, B, A].join()
@@ -1865,6 +1929,93 @@ await reset();
   check('the next day plans the 6 again, spread over the three accounts', old.every((e) => p2.items.some((i) => i.email === e))
     && DW.every((a) => p2.items.some((i) => i.account === a)), JSON.stringify(p2.items.map((i) => [i.account, i.email])));
   delete process.env.GMAIL_APP_PASSWORD_DAWIT;
+  await saveSettings({ paused: true });
+}
+
+// ============================================================ held contacts back to the queue
+section('Held for a placeholder problem: counted per lane, requeued only once they render cleanly, at the front of the queue');
+await reset();
+{
+  E.setRandom(mulberry(71));
+  const W = 'dawit@held-one.example';
+  process.env.GMAIL_APP_PASSWORD_DAWIT = 'fakepw-dawit-8888';
+  await admin('account.add', { account: W, name: 'Dawit', lane: 'work' });
+  await admin('lanes.save', { lanes: { work: { template: 'custom', custom: { subject: 'Intro for {{first_name}} in {{city}}', body: 'Hi {{first_name}},\n\nA short note.\n\n{{sender_name}}' } } } });
+  const HELD = ['held1@hone.example', 'held2@htwo.example', 'held3@hthree.example'];
+  await admin('contacts.upload', { lane: 'work', csv: ['email,company,first_name,city,email_status', ...HELD.map((e, i) => `${e},Held Co ${i},,,valid`), 'named@nfirm.example,Named Co,Nia,Oslo,valid'].join('\n') });
+  await saveSettings({ paused: false });
+  const d = '2026-11-30', d2 = '2026-12-01';
+  const day = async (date) => { for (let t = EAT(date, '08:55'); t <= EAT(date, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); } };
+  await day(d);
+  const stat = async (e) => JSON.parse(await command('HGET', S.K.contacts, e)).status;
+  check('day 1: the lead with a city is sent, the 3 without one are held (blocked) and out of the queue',
+    sim.sent.map((m) => m.to).join() === 'named@nfirm.example' && (await Promise.all(HELD.map(stat))).every((s) => s === 'blocked')
+    && Number(await command('LLEN', S.K.queueOf('work'))) === 0);
+  const h1 = (await admin('contacts.held', { lane: 'work' })).json;
+  check('contacts.held: none render cleanly yet, 3 still lack {{city}}; the Regular lane has none', h1.ready === 0 && h1.still['{{city}} empty'] === 3
+    && (await admin('contacts.held', { lane: 'regular' })).json.ready === 0, JSON.stringify(h1));
+  const r0 = (await admin('contacts.requeueHeld', { lane: 'work' })).json;
+  check('requeueHeld while the template is still broken puts nobody back', r0.requeued === 0 && (await Promise.all(HELD.map(stat))).every((s) => s === 'blocked'));
+  await admin('lanes.save', { lanes: { work: { custom: { subject: 'Intro for {{company}}', body: 'Hi {{first_name}},\n\nA short note.\n\n{{sender_name}}' } } } });
+  const h2 = (await admin('contacts.held', { lane: 'work' })).json;
+  check('after the template is fixed all 3 render cleanly', h2.ready === 3 && !Object.keys(h2.still).length, JSON.stringify(h2));
+  const r1 = (await admin('contacts.requeueHeld', { lane: 'work' })).json;
+  check('requeueHeld puts the 3 back at the front of the Work queue, oldest first, as queued', r1.requeued === 3
+    && (await command('LRANGE', S.K.queueOf('work'), 0, -1)).join() === HELD.join() && (await Promise.all(HELD.map(stat))).every((s) => s === 'queued'), JSON.stringify(r1));
+  await day(d2);
+  check('day 2 sends them, with the fixed subject, "Hi there," for no first name', HELD.every((e) => sim.sent.some((m) => m.to === e && m.subject.startsWith('Intro for Held Co') && /^Hi there,/.test(m.mail.text))), sim.sent.map((m) => `${m.to} ${m.subject}`).join(' | '));
+  delete process.env.GMAIL_APP_PASSWORD_DAWIT;
+  await saveSettings({ paused: true });
+}
+
+// ============================================================ first name fallback
+section('{{first_name}} without a first name: the first word of a person\'s name, else "there"');
+{
+  const fn = (c) => R.withWording(c).first_name;
+  check('own first name kept; "Nicholas Hartigan" -> Nicholas; a company name or one word -> there',
+    fn({ first_name: 'Nia', name: 'X Y' }) === 'Nia' && fn({ name: 'Nicholas Hartigan' }) === 'Nicholas' && fn({ name: 'Avenue Property', company: 'Avenue Property' }) === 'there'
+    && fn({ name: 'ACME LTD' }) === 'there' && fn({ name: 'Madonna' }) === 'there' && fn({}) === 'there' && fn({ first_name: '  ', name: 'jean-luc picard' }) === 'Jean-luc');
+  const p = R.problems({ subject: 'Hi {{first_name}}', body: 'Hi {{first_name}},\n\nx' }, R.withWording({ email: 'a@b.example', first_name: '' }));
+  check('an empty first name is no longer a placeholder problem', p.ok, JSON.stringify(p));
+}
+
+// ============================================================ swap today's planned sends to a new list
+section('plan.swapToday: a started day\'s planned first emails go to the new list, same accounts and times');
+await reset();
+{
+  E.setRandom(mulberry(83));
+  const W1 = 'amy@swap-one.example', W2 = 'ben@swap-two.example';
+  process.env.GMAIL_APP_PASSWORD_AMY = 'fakepw-amy'; process.env.GMAIL_APP_PASSWORD_BEN = 'fakepw-ben';
+  await admin('account.add', { account: W1, name: 'Amy', lane: 'work' });
+  await admin('account.add', { account: W2, name: 'Ben', lane: 'work' });
+  await admin('lanes.save', { lanes: { work: { cap: 3 } } });
+  const OLD = Array.from({ length: 8 }, (_, i) => `old${i}@oldco${i}.example`), NEW = Array.from({ length: 5 }, (_, i) => `new${i}@newco${i}.example`);
+  const csv = (list, tag) => ['email,first_name,company,email_status', ...list.map((e, i) => `${e},${tag}${i},${tag} Co ${i},valid`)].join('\n');
+  await admin('contacts.upload', { lane: 'work', csv: csv(OLD, 'Old') });
+  await saveSettings({ paused: false });
+  const d = '2026-12-07';
+  // Send until the day's first email has gone out, then a new list arrives.
+  let t = EAT(d, '08:55');
+  for (; t <= EAT(d, '18:00') && !sim.sent.length; t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  const before = await E.readPlan(d);
+  const startedOld = before.items.filter((it) => it.status === 'planned').sort((a, b) => a.at - b.at).map((it) => it.email);
+  check('day started: 1 sent, 5 old planned', sim.sent.length === 1 && startedOld.length === 5 && startedOld.every((e) => OLD.includes(e)), `${sim.sent.length} ${startedOld}`);
+  // The admin routes run on the real clock; the day here is simulated.
+  await E.clearQueue('work');
+  await E.uploadContacts(csv(NEW, 'New'), { lane: 'work', now: t });
+  const sw = await E.swapTodayPlanned('work', t);
+  const after = await E.readPlan(d);
+  const planned = after.items.filter((it) => it.status === 'planned');
+  check('swap: the 5 planned old leads become the 5 new ones, same ids, accounts and times', sw.swapped === 5 && sw.notSwapped === 0
+    && planned.map((it) => it.email).sort().join() === NEW.join() && planned.every((it) => { const o = before.items.find((b) => b.id === it.id); return o && o.account === it.account && o.at === it.at; }), JSON.stringify(sw));
+  const q = await command('LRANGE', S.K.queueOf('work'), 0, -1);
+  check('the replaced old leads wait at the back of the Work queue, as queued', q.join() === startedOld.join()
+    && (await Promise.all(startedOld.map(async (e) => JSON.parse(await command('HGET', S.K.contacts, e)).status))).every((s) => s === 'queued'), q.join());
+  for (; t <= EAT(d, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  check('the rest of the day sends the new list, not the old one', NEW.every((e) => sim.sent.some((m) => m.to === e)) && sim.sent.length === 6, sim.sent.map((m) => m.to).join());
+  check('a second swap with nothing planned changes nothing', (await E.swapTodayPlanned('work', t)).swapped === 0);
+  check('plan.swapToday answers through the admin API', (await admin('plan.swapToday', { lane: 'work' })).status === 200);
+  delete process.env.GMAIL_APP_PASSWORD_AMY; delete process.env.GMAIL_APP_PASSWORD_BEN;
   await saveSettings({ paused: true });
 }
 

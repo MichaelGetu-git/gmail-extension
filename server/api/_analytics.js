@@ -5,7 +5,7 @@
 //
 // Only counts leave here: no addresses, names or bodies.
 import { command } from './_store.js';
-import { K, DAY, eatDate, addDays } from './_settings.js';
+import { K, DAY, eatDate, addDays, LANES, contactLane } from './_settings.js';
 import { readConfig } from './config.js';
 import { followUpsDue, accountsOf } from './_engine.js';
 
@@ -51,7 +51,8 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
   const today = eatDate(now);
   const dayKeys = Array.from({ length: days }, (_, i) => addDays(today, i - days + 1));
   const inRange = new Set(dayKeys);
-  const perDay = Object.fromEntries(dayKeys.map((d) => [d, { sent: 0, opened: 0, replied: 0, bounced: 0, unsubscribed: 0 }]));
+  // tracked: sends that carry the open pixel (not plain text), the open-rate denominator.
+  const perDay = Object.fromEntries(dayKeys.map((d) => [d, { sent: 0, tracked: 0, opened: 0, replied: 0, bounced: 0, unsubscribed: 0 }]));
   const onDay = (at, k) => { const d = eatDate(at); if (inRange.has(d)) perDay[d][k]++; };
   const byAccount = {}, bySegment = {}, accounts = {}, templates = {}, segments = {};
   // trackedContacts / trackedEmails leave out plain-text sends, which carry no
@@ -59,6 +60,10 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
   // autoReplied: out-of-office answers, kept out of the reply rate.
   const totals = { contacts: 0, emails: 0, opened: 0, openedContacts: 0, replied: 0, autoReplied: 0, bounced: 0, unsubscribed: 0, trackedContacts: 0, trackedEmails: 0, plainEmails: 0 };
   const pipe = { touch: {}, replied: 0, bounced: 0, unsubscribed: 0, finished: 0 };
+  // Per sending lane (Regular, Work, Hot): contacts, emails, today's and the
+  // last 7 days' sends, replies, bounces, unsubscribes.
+  const weekFrom = addDays(today, -6);
+  const lanes = Object.fromEntries(LANES.map((l) => [l, { contacts: 0, emails: 0, today: 0, last7d: 0, replied: 0, autoReplied: 0, bounced: 0, unsubscribed: 0 }]));
   // Personalised (first email carried the contact's own subject/opening line)
   // vs standard, per contact. 'same period' = standard contacts first emailed
   // on or after the first personalised email, the fairer comparison.
@@ -72,19 +77,24 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
     const acc = (accounts[r.account] ||= { daily: {}, contacts: 0, sent: 0, opened: 0, replied: 0, bounced: 0, unsubscribed: 0 });
     acc.contacts++;
     const seg = segmentOf(r.template);
-    const sg = (segments[seg] ||= { contacts: 0, sent: 0, opened: 0, replied: 0, bounced: 0 });
+    const sg = (segments[seg] ||= { contacts: 0, tracked: 0, sent: 0, opened: 0, replied: 0, bounced: 0 });
     sg.contacts++;
+    const ln = lanes[contactLane(r)];
+    ln.contacts++;
     let anyOpen = false, unsubAt = r.unsubscribedAt || null;
-    if (r.touches.some((t) => !t.plain)) totals.trackedContacts++;
+    if (r.touches.some((t) => !t.plain)) { totals.trackedContacts++; sg.tracked++; }
     for (const t of r.touches) {
       const d = eatDate(t.at);
       const opAt = firstOpen.get(t.t);
-      totals.emails++; acc.sent++; sg.sent++;
+      totals.emails++; acc.sent++; sg.sent++; ln.emails++;
+      if (d === today) ln.today++;
+      if (d >= weekFrom && d <= today) ln.last7d++;
       if (t.plain) totals.plainEmails++; else totals.trackedEmails++;
       if (opAt) { totals.opened++; anyOpen = true; onDay(opAt, 'opened'); }
       if (!unsubAt && unsubRaw.get(t.t)) unsubAt = Number(unsubRaw.get(t.t)) || now;
       if (inRange.has(d)) {
         perDay[d].sent++;
+        if (!t.plain) perDay[d].tracked++;
         bump((byAccount[d] ||= {}), r.account);
         bump((bySegment[d] ||= {}), t.template || r.template);
         bump(acc.daily, d);
@@ -109,6 +119,9 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
       if (r.repliedAt) g.replied++; else if (r.autoReplyAt) g.autoReplied++;
       if (r.bouncedAt) g.bounced++;
     }
+    if (r.repliedAt) ln.replied++; else if (r.autoReplyAt) ln.autoReplied++;
+    if (r.bouncedAt) ln.bounced++;
+    if (unsubAt) ln.unsubscribed++;
     if (r.repliedAt) { totals.replied++; acc.replied++; sg.replied++; credit(r.repliedAt, 'replied'); onDay(r.repliedAt, 'replied'); }
     else if (r.autoReplyAt) totals.autoReplied++;
     if (r.bouncedAt) { totals.bounced++; acc.bounced++; sg.bounced++; credit(r.bouncedAt, 'bounced'); onDay(r.bouncedAt, 'bounced'); }
@@ -142,7 +155,7 @@ export async function analytics(now = Date.now(), { days = 30, logDays = 14 } = 
   const order = [...new Set([...accountsOf(config), ...Object.keys(accounts)])];
   return {
     now, today, days: dayKeys, configVersion: config.version || 0, maxTouches: config.maxTouches, followUpDays: config.followUpDays,
-    totals, perDay, byAccount, bySegment, personalisation: pz,
+    totals, perDay, byAccount, bySegment, personalisation: pz, lanes,
     accounts: order.map((a) => ({ account: a, ...(accounts[a] || { daily: {}, contacts: 0, sent: 0, opened: 0, replied: 0, bounced: 0, unsubscribed: 0 }) })),
     segments,
     templates: Object.values(templates).sort((a, b) => a.template.localeCompare(b.template) || (b.version ?? -1) - (a.version ?? -1)),

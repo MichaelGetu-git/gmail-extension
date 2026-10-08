@@ -69,6 +69,11 @@
         <div class="grid g-kpi mb" id="kpis"></div>
 
         <div class="card mb">
+          <div class="card-h"><div><h2>By lane</h2><p class="cap">Dashboard sends per lane: Regular (the main Contacts list), Work and Hot (the Hot leads page). Work and Hot send plain text, so their opens are not tracked; replies and bounces are exact.</p></div></div>
+          <div class="tbl-wrap"><table id="ovLanes" class="nowrap"></table></div>
+        </div>
+
+        <div class="card mb">
           <div class="card-h"><div><h2>Latest replies</h2><p class="cap">Who answered a dashboard email, and when. Every inbox is checked for replies every few minutes; out-of-office auto-replies are kept apart and never count toward the reply rate.</p></div><div class="spacer"></div>
             <div class="row"><button class="btn small" id="ovScan">Check inboxes now</button><button class="btn small" id="ovAllReplies">See all replies</button></div></div>
           <div class="tbl-wrap"><table id="ovReplies" class="nowrap"></table></div>
@@ -271,6 +276,7 @@
           <div class="card-h"><div><h2>Waiting for a first email (Regular lane)</h2><p class="cap" id="qCap">—</p></div><div class="spacer"></div>
             <div class="seg" id="qFilter"><button data-f="all" class="on">All</button><button data-f="personal">Personalised</button><button data-f="standard">Standard</button></div>
             <button class="btn small danger" id="qClear">Clear queue</button></div>
+          <div id="qHeld"></div>
           <div id="qCoverage"></div>
           <div class="tbl-wrap"><table id="queue" class="nowrap"></table></div>
         </div>
@@ -298,6 +304,8 @@
       <!-- ======================================================== REPLIES -->
       <section class="view hidden" id="v-replies">
         <div id="rpHealth"></div>
+        <div class="card mb"><div class="card-h"><div><h2>Telegram notices</h2><p class="cap" id="tgCap">New replies (not out-of-office) are sent to Telegram, at most every 30 minutes.</p></div><div class="spacer"></div>
+          <button class="btn small" id="tgTest">Send test message</button></div><div id="tgStatus"></div></div>
         <div class="card">
           <div class="row" style="margin-bottom:14px">
             <div class="seg" id="rpKind"><button data-kind="replies" class="on">People</button><button data-kind="auto">Auto-replies</button><button data-kind="all">All</button></div>
@@ -392,7 +400,9 @@
         </div>
         <div class="card">
           <div class="card-h"><div><h2 id="lQTitle">Waiting in this lane</h2><p class="cap" id="lQCap">—</p></div><div class="spacer"></div>
+            <button class="btn small" id="lQSwap" title="Today's first emails still planned in this lane go to the front of this queue instead; the ones they replace go to the back">Send today's remaining to this queue</button>
             <button class="btn small danger" id="lQClear">Clear this lane's queue</button></div>
+          <div id="lHeld"></div>
           <div class="tbl-wrap"><table id="lQueue" class="nowrap"></table></div>
         </div>
       </section>

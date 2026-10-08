@@ -21,6 +21,7 @@ import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, wit
 import { checkMany, checkOne, syncUnsubscribes } from './_suppress.js';
 import { transportFor, classifySmtpError } from './_smtp.js';
 import { scanInbox, msgIds } from './_imap.js';
+import { notifyReplies } from './_telegram.js';
 
 let rand = Math.random;
 export function setRandom(f) { rand = f; }
@@ -502,6 +503,58 @@ export async function requeueStranded() {
   return releaseItems(stranded.map((c) => ({ email: c.email, followUp: false, status: 'planned', at: c.addedAt || 0 })));
 }
 
+// Contacts held back at send time for a placeholder problem (status
+// "blocked"), in one lane, checked as the upload checks them against the
+// templates as they are now: `ready` render cleanly, `still` counts the rest
+// by problem. Held contacts have left the queue, so fixing the template or
+// the list alone does not bring them back; requeueHeld does.
+export async function heldContacts(lane) {
+  lane = normLane(lane);
+  const settings = await readSettings();
+  const config = await readConfig();
+  const templates = templatesFor(config, settings);
+  const ro = renderOptsFor(settings, lane);
+  const footer = ro.plain ? ro.optOut : settings.footer;
+  const ready = [], still = {};
+  let cursor = '0';
+  do {
+    const [next, flat] = await command('HSCAN', K.contacts, cursor, 'COUNT', 500);
+    cursor = String(next);
+    for (let i = 0; i < (flat || []).length; i += 2) {
+      const c = parse(flat[i + 1]);
+      if (!c?.email || c.status !== 'blocked' || !/^placeholder problem/.test(c.reason || '') || contactLane(c) !== lane) continue;
+      const template = firstTemplateFor(settings, lane, c.template || routeContact(c.row || {}));
+      const sendRow = rowFor(settings, c.row || {});
+      const p = problems(personalise(templates[template] || {}, sendRow, template), withWording({ ...sendRow, _segment: template, sender_name: 'x' }), footer);
+      if (p.ok) { ready.push(c); continue; }
+      const why = [...p.missing.map((f) => `{{${f}}} missing`), ...p.empty.map((f) => `{{${f}}} empty`)].join(', ') || 'template empty';
+      still[why] = (still[why] || 0) + 1;
+    }
+  } while (cursor !== '0');
+  // Oldest upload first; one upload shares a timestamp, so then by address.
+  ready.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0) || a.email.localeCompare(b.email));
+  return { lane, ready, still };
+}
+
+// The held contacts that render cleanly now go back to the front of their
+// lane's queue, oldest first (they were first in line), unless suppressed
+// since. The rest stay held, so a template that is still broken never burns
+// them twice.
+export async function requeueHeld(lane, now = Date.now()) {
+  const settings = await readSettings();
+  const { ready, still } = await heldContacts(lane);
+  const reasons = ready.length ? await checkMany(ready.map((c) => c.email), { settings, firstTouch: true }) : new Map();
+  const ok = ready.filter((c) => !reasons.get(c.email));
+  if (ok.length) {
+    await pipeline([
+      ['LPUSH', K.queueOf(normLane(lane)), ...ok.map((c) => c.email).reverse()],
+      ['HSET', K.contacts, ...ok.flatMap((c) => [c.email, JSON.stringify({ ...c, status: 'queued', reason: null, plannedFor: null })])],
+    ]);
+    await invalidatePlans(now, { includeUntouchedToday: true, settings });
+  }
+  return { lane: normLane(lane), requeued: ok.length, suppressed: ready.length - ok.length, still };
+}
+
 // Once: if accounts share the part before the @, plans built before item ids
 // used the whole address are missing emails. Rebuild the provisional ones,
 // then put their stranded contacts back in the queue.
@@ -692,6 +745,53 @@ export async function buildPlan(date, now, settings) {
   if (contactPairs.length) cmds.push(['HSET', K.contacts, ...contactPairs]);
   await pipeline(cmds);
   return readPlan(date);
+}
+
+// Today's plan, once started, is never rebuilt, so a list uploaded mid-day
+// waits behind the contacts it already holds. This swaps them: each first
+// email still planned today in the lane keeps its account and time but goes to
+// the next contact in the lane's queue (same checks as building a plan), and
+// the contact it replaces goes to the back of the queue. Follow-ups stay.
+export async function swapTodayPlanned(lane, now = Date.now()) {
+  lane = normLane(lane);
+  const settings = await readSettings();
+  const today = sendingDay(now, settings);
+  const plan = await readPlan(today);
+  const olds = plan.items.filter((it) => !it.followUp && it.status === 'planned' && normLane(it.lane) === lane).sort((a, b) => a.at - b.at);
+  const tplOf = (c) => firstTemplateFor(settings, lane, c.template || routeContact(c.row || {}));
+  const picked = [], skipped = [], held = [], strays = [];
+  while (picked.length < olds.length) {
+    const popped = [].concat((await command('LPOP', K.queueOf(lane), olds.length - picked.length)) || []);
+    if (!popped.length) break;
+    const recs = await command('HMGET', K.contacts, ...popped);
+    const reasons = await checkMany(popped, { settings, firstTouch: true });
+    popped.forEach((e, j) => {
+      const c = parse(recs[j]);
+      if (!c || c.status === 'removed') return;
+      if (contactLane(c) !== lane) { strays.push(c); return; }
+      const r = reasons.get(e);
+      if (r) skipped.push({ ...c, status: 'skipped', reason: r });
+      else if (templateOff(settings, tplOf(c))) held.push(c);
+      else picked.push(c);
+    });
+  }
+  const swapped = olds.slice(0, picked.length);
+  const items = swapped.map((it, i) => ({ ...it, email: picked[i].email, template: tplOf(picked[i]), company: picked[i].row?.company || '' }));
+  const outs = swapped.map((it) => it.email);
+  const outRecs = outs.length ? await command('HMGET', K.contacts, ...outs) : [];
+  const cmds = [];
+  if (held.length) cmds.push(['LPUSH', K.queueOf(lane), ...held.map((c) => c.email).reverse()]);
+  for (const c of strays) cmds.push(['RPUSH', K.queueOf(contactLane(c)), c.email]);
+  if (outs.length) cmds.push(['RPUSH', K.queueOf(lane), ...outs]);
+  if (items.length) cmds.push(['HSET', K.plan(today), ...items.flatMap((it) => [it.id, JSON.stringify(it)])]);
+  const pairs = [
+    ...picked.flatMap((c) => [c.email, JSON.stringify({ ...c, status: 'planned', plannedFor: today })]),
+    ...outs.flatMap((e, j) => [e, JSON.stringify({ ...parse(outRecs[j], { email: e }), status: 'queued', plannedFor: null })]),
+    ...skipped.flatMap((c) => [c.email, JSON.stringify(c)]),
+  ];
+  if (pairs.length) cmds.push(['HSET', K.contacts, ...pairs]);
+  if (cmds.length) await pipeline(cmds);
+  return { lane, date: today, planned: olds.length, swapped: items.length, notSwapped: olds.length - items.length, skipped: skipped.length };
 }
 
 // If the trigger was down or sending was paused, the remaining sends are
@@ -1271,6 +1371,8 @@ export async function tick({ now = Date.now(), budgetMs = 40000, scan = true } =
       const s = await maybeScan(now, config, { t0, budgetMs, notes: out.notes });
       if (s.length) { out.scan = s[0]; out.scans = s; }
     }
+    try { const n = await notifyReplies(now, out.notes); if (n) out.telegram = n; }
+    catch (e) { out.notes.push(`telegram failed: ${e.message}`); }
   } finally {
     await releaseLock(lockId);
   }
@@ -1312,7 +1414,7 @@ export async function scanAccount(account, now = Date.now()) {
     throw new Error(`${account}: ${msg}`);
   }
   let replies = 0, autoReplies = 0, bounces = 0;
-  const feed = [];
+  const feed = [], tg = [];   // tg: real replies for the Telegram notice
   for (const r of found.replies) {
     const rec = parse(await command('HGET', K.sent, r.email));
     if (!rec || rec.repliedAt || r.at < rec.firstSentAt) continue;
@@ -1322,6 +1424,7 @@ export async function scanAccount(account, now = Date.now()) {
     await pipeline([['HSET', K.sent, r.email, JSON.stringify(rec)], ['ZREM', K.fu, r.email]]);
     await addLog({ account, to: r.email, status: 'replied', subject: r.subject, templateId: rec.template, ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
     feed.push({ email: r.email, at: r.at, account, subject: r.subject || '', ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
+    tg.push({ email: r.email, at: r.at, account, subject: r.subject || '', company: rec.company || '', ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
     replies++;
   }
   // An out-of-office is not an answer: it is kept apart from the reply rate
@@ -1336,6 +1439,7 @@ export async function scanAccount(account, now = Date.now()) {
     feed.push({ email: r.email, at: r.at, account, subject: r.subject || '', auto: true });
     autoReplies++;
   }
+  if (tg.length) await command('RPUSH', K.tgPending, ...tg.map((r) => JSON.stringify(r)));
   if (feed.length) {
     await pipeline([['LPUSH', K.replies, ...feed.map((f) => JSON.stringify(f))], ['LTRIM', K.replies, 0, 499]]);
     // Only ever forward: accounts are scanned one after another, and an older

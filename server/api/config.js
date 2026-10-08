@@ -9,6 +9,8 @@ import { body, isAdmin, isTeam, send, teamCors } from './_auth.js';
 import { DEFAULT_TEMPLATES } from './_defaults.js';
 
 const KEY = 'mailer:config';
+// Sending accounts on the team list (every lane together).
+export const MAX_SENDERS = 60;
 export const TEMPLATE_IDS = ['callcenter', 'callcenter-generic', 'tech', 'va', 'followup'];
 
 export const DEFAULT_CONFIG = {
@@ -42,7 +44,7 @@ export function cleanConfig(input, prev = DEFAULT_CONFIG) {
     templates[id] = { subject: str(t.subject, 300), body: str(t.body, 6000) };
   }
   const senders = {};
-  for (const [email, name] of Object.entries(input.senders || prev.senders).slice(0, 20)) {
+  for (const [email, name] of Object.entries(input.senders || prev.senders).slice(0, MAX_SENDERS)) {
     const e = String(email).trim().toLowerCase();
     if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(e)) senders[e] = str(name, 40).trim();
   }
