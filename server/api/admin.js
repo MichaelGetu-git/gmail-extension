@@ -18,6 +18,7 @@ import {
   listLog, getLogBody, addLog, health, followUpsDue, scanAccount, scanAll, tick, accountsOf, testBatchPlan, sendTestBatch, testFollowUpPlan, sendTestFollowUps,
   laneAccounts, runStatus, testCountKey, templatesFor, firstTemplateFor, followupTemplateFor, renderOptsFor, personalLines, rowFor, fromHeader, senderOf, previewContact,
   CONTACT_COLUMNS, ROUTING_COLUMNS, WORDING_COLUMNS, SKIP_CATEGORIES, heldContacts, requeueHeld, swapTodayPlanned,
+  listUploads, rushUpload, unrushUpload,
 } from './_engine.js';
 import { checkOne, importLists, counts as suppCounts, isRoleAddress } from './_suppress.js';
 import { tgConfigured, tgTargets, resolveChats, sendTelegram, NOTIFY_EVERY_MIN } from './_telegram.js';
@@ -27,6 +28,7 @@ import { analytics } from './_analytics.js';
 import { inventory, resetData } from './_reset.js';
 import { purgePreview, purgeData } from './_purge.js';
 import { listReplies, latestReplies } from './_replies.js';
+import { getConversation, sendAnswer } from './_conversation.js';
 
 const SAMPLE_ROW = {
   email: 'sample@example.com', company: 'Sample Dental Ltd', first_name: 'Sam', name: 'Sam', vertical: 'dental',
@@ -217,6 +219,10 @@ const actions = {
   // Today's first emails still planned in a lane go to the next contacts in
   // its queue instead (same accounts and times); the replaced ones go to the back.
   async 'plan.swapToday'(b) { return withLock(() => swapTodayPlanned(normLane(b.lane), Date.now())); },
+  // A lane's uploads, and "Send follow-ups now" for one of them (Hot leads page).
+  async 'uploads.list'(b) { return listUploads(normLane(b.lane)); },
+  async 'uploads.rush'(b) { return withLock(() => rushUpload({ lane: normLane(b.lane), addedAt: Number(b.addedAt), now: Date.now() }), { waitMs: 15000 }); },
+  async 'uploads.unrush'(b) { return withLock(() => unrushUpload({ lane: normLane(b.lane), addedAt: Number(b.addedAt), now: Date.now() })); },
   async 'plan.rebuild'(b) {
     const now = Date.now();
     return withLock(async () => {
@@ -393,6 +399,10 @@ const actions = {
   async 'scan.all'() { return withLock(() => scanAll(Date.now()), { waitMs: 15000 }); },
   async 'replies.list'(b) { return listReplies({ kind: ['replies', 'auto', 'all'].includes(b.kind) ? b.kind : 'replies', q: b.q || '', limit: b.limit }); },
   async 'replies.latest'() { return latestReplies(20); },
+  // One person's conversation (our emails, their messages, our answers), and
+  // answering it from the dashboard, from the account that emailed them.
+  async 'conversation.get'(b) { return getConversation(b.email); },
+  async 'conversation.answer'(b) { return sendAnswer({ email: b.email, text: b.text, now: Date.now() }); },
   // Telegram reply notices: whether the bot is set up, who gets them (and who
   // still has to /start the bot), how many replies wait for the next notice.
   async 'telegram.status'() {

@@ -14,7 +14,7 @@ import { command, pipeline } from './_store.js';
 import {
   K, readSettings, readAccountStates, patchAccountState, hasPassword, passwordVar, mailServer, serverVar,
   DAY, eatDate, eatWeekday, eatAt, eatClock, toMin, addDays, nextWeekday, dayWindow, sendingDay,
-  LANES, LANE_LABEL, laneOf, laneOpts, laneCap, contactLane, normLane,
+  LANES, LANE_LABEL, laneOf, laneOpts, laneCap, laneFollowUpsPerDay, contactLane, normLane,
 } from './_settings.js';
 import { readConfig } from './config.js';
 import { renderEmail, newToken, routeContact, normEmail, EMAIL_RE, parseCsv, withWording, problems, personalise, SEGMENTS } from './_render.js';
@@ -622,6 +622,7 @@ export async function buildPlan(date, now, settings) {
   const active = accounts.filter((a) => !states[a]?.paused);
   const laneOfAcct = Object.fromEntries(accounts.map((a) => [a, laneOf(settings, a)]));
   const capOf = (a) => laneCap(settings, laneOfAcct[a]);
+  const fuCapOf = (a) => Math.min(capOf(a), laneFollowUpsPerDay(settings, laneOfAcct[a]));
   for (const a of accounts) {
     meta.accounts[a] = { paused: Boolean(states[a]?.paused), noPassword: !hasPassword(a), followUps: 0, fresh: 0, start: null };
     if (laneOfAcct[a] !== 'regular') meta.accounts[a].lane = laneOfAcct[a];
@@ -639,36 +640,38 @@ export async function buildPlan(date, now, settings) {
 
   // Follow-ups first: contacts whose last email is followUpDays old by then,
   // from the same account (and so the same lane) as their first email. At most
-  // followUpsPerDay per account, oldest first; the rest wait in mailer:srv:fu
-  // for the next sending days, and the cap's remainder goes to new contacts.
+  // followUpsPerDay per account (the lane's own for Work and Hot), rushed ones
+  // first, then oldest first; the rest wait in mailer:srv:fu for the next
+  // sending days, and the cap's remainder goes to new contacts.
   const byAcct = Object.fromEntries(active.map((a) => [a, []]));
   if (settings.followUps) {
     const cutoff = eatAt(date, Math.max(24 * 60, win.cutoff)) - config.followUpDays * DAY;
     const emails = (await command('ZRANGEBYSCORE', K.fu, '-inf', cutoff, 'LIMIT', 0, 1000)) || [];
-    if (emails.length) {
+    const rushed = await rushCandidates(date, settings, config);
+    const taken = new Set();
+    if (emails.length || rushed.length) {
       // Follow-ups another day's plan already holds (today's, while it runs)
       // go out there; this day takes the next ones in line.
-      const elsewhere = new Set();
-      for (const d of ((await command('SMEMBERS', K.plans)) || []).filter((d) => d !== date)) {
-        for (const it of (await readPlan(d)).items) {
-          if (it.followUp && (it.status === 'planned' || it.status === 'sending')) elsewhere.add(`${it.email}#${it.touch}`);
-        }
+      const elsewhere = await followUpsPlannedElsewhere(date);
+      // Rushed follow-ups take the account's follow-up slots first.
+      for (const { email, rec, touch } of rushed) {
+        const a = rec.account, lane = contactLane(rec);
+        if (!byAcct[a] || byAcct[a].length >= fuCapOf(a) || elsewhere.has(`${email}#${touch}`) || !followUpFits(settings, rec, laneOfAcct[a])) continue;
+        byAcct[a].push({ email, template: followupTemplateFor(settings, lane), followUp: true, touch, company: rec.company || '', rush: true, ...laneTag(lane) });
+        taken.add(email);
       }
       const reasons = await checkMany(emails, { settings, firstTouch: false });
       const recs = [];
       for (let i = 0; i < emails.length; i += 300) recs.push(...(await command('HMGET', K.sent, ...emails.slice(i, i + 300))));
       for (let i = 0; i < emails.length; i++) {
+        if (taken.has(emails[i])) continue;
         const rec = parse(recs[i]);
         const touches = rec?.touches?.length || 0;
         if (!rec || reasons.get(emails[i]) || touches >= config.maxTouches) { await command('ZREM', K.fu, emails[i]); continue; }
-        if (!byAcct[rec.account] || byAcct[rec.account].length >= Math.min(capOf(rec.account), settings.followUpsPerDay)) continue;
+        if (!byAcct[rec.account] || byAcct[rec.account].length >= fuCapOf(rec.account)) continue;
         if (elsewhere.has(`${emails[i]}#${touches + 1}`)) continue;
-        // Never across lanes: if the account has moved to another lane, its
-        // earlier contacts' follow-ups wait (they stay in rotation).
+        if (!followUpFits(settings, rec, laneOfAcct[rec.account])) continue;
         const lane = contactLane(rec);
-        if (laneOfAcct[rec.account] !== lane) continue;
-        if (lane !== 'regular' && !laneOpts(settings, lane).followUps) continue;
-        if (templateOff(settings, rec.touches[0]?.template)) continue;   // stays in rotation until switched back on
         byAcct[rec.account].push({ email: rec.email, template: followupTemplateFor(settings, lane), followUp: true, touch: touches + 1, company: rec.company || '', ...laneTag(lane) });
       }
     }
@@ -745,6 +748,221 @@ export async function buildPlan(date, now, settings) {
   if (contactPairs.length) cmds.push(['HSET', K.contacts, ...contactPairs]);
   await pipeline(cmds);
   return readPlan(date);
+}
+
+// Can this follow-up go out from its account's lane? Never across lanes: if
+// the account has moved to another lane, its earlier contacts' follow-ups wait
+// (they stay in rotation), as they do while the lane's follow-ups or the first
+// email's category are switched off.
+function followUpFits(settings, rec, accountLane) {
+  const lane = contactLane(rec);
+  if (accountLane !== lane) return false;
+  if (lane !== 'regular' && !laneOpts(settings, lane).followUps) return false;
+  return !templateOff(settings, rec.touches?.[0]?.template);
+}
+
+// Follow-ups ("email#touch") planned or being sent in any day's plan but `date`'s.
+async function followUpsPlannedElsewhere(date) {
+  const out = new Set();
+  for (const d of ((await command('SMEMBERS', K.plans)) || []).filter((d) => d !== date)) {
+    for (const it of (await readPlan(d)).items) {
+      if (it.followUp && (it.status === 'planned' || it.status === 'sending')) out.add(`${it.email}#${it.touch}`);
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ rushed follow-ups
+// "Send follow-ups now" for one upload (Hot leads page). Its contacts' next
+// follow-up skips the followUpDays wait, though never on the sending day of
+// their last email, and goes first: it takes the account's follow-up slots
+// (followUpsPerDay, the lane's own for Work and Hot) before other follow-ups;
+// the rest of the cap still goes to new contacts. Everything else is the normal
+// follow-up path (the account that sent the first email, its lane, every stop
+// rule). Once that follow-up has gone out the contact leaves the rush, so the
+// touch after it waits the usual followUpDays.
+
+// Rushed contacts whose follow-up can go out on `date`, oldest last email first.
+// Anyone out of rotation (replied, bounced, unsubscribed, at maxTouches) leaves the rush.
+async function rushCandidates(date, settings, config) {
+  const emails = (await command('SMEMBERS', K.fuRush)) || [];
+  const out = [], drop = [];
+  for (let i = 0; i < emails.length; i += 300) {
+    const chunk = emails.slice(i, i + 300);
+    const [recs, ...scores] = await pipeline([['HMGET', K.sent, ...chunk], ...chunk.map((e) => ['ZSCORE', K.fu, e])]);
+    const reasons = await checkMany(chunk, { settings, firstTouch: false });
+    chunk.forEach((email, j) => {
+      const rec = parse(recs[j]);
+      const touches = rec?.touches?.length || 0;
+      if (!rec || scores[j] === null || reasons.get(email) || touches >= config.maxTouches) { drop.push(email); return; }
+      if (sendingDay(rec.lastSentAt, settings) < date) out.push({ email, rec, touch: touches + 1 });
+    });
+  }
+  if (drop.length) await command('SREM', K.fuRush, ...drop);
+  return out.sort((a, b) => a.rec.lastSentAt - b.rec.lastSentAt || a.email.localeCompare(b.email));
+}
+
+// Today's plan, once started, is never rebuilt: rushed follow-ups take over the
+// sends still planned today, account by account (a follow-up only goes from
+// the account that sent the first email), at the same times. First emails they
+// replace go back to the front of their lane's queue; follow-ups they replace
+// stay in rotation for the next days.
+export async function divertTodayToRush(now = Date.now()) {
+  const settings = await readSettings();
+  const config = await readConfig();
+  const today = sendingDay(now, settings);
+  const plan = await readPlan(today);
+  if (!plan.meta) return { date: today, swapped: 0, firstEmailsBack: 0 };
+  const states = await readAccountStates();
+  const inPlan = new Set(plan.items.filter((it) => it.followUp).map((it) => `${it.email}#${it.touch}`));
+  const elsewhere = await followUpsPlannedElsewhere(today);
+  const candidates = await rushCandidates(today, settings, config);
+  const rushNow = new Set(candidates.map((c) => c.email));
+  const byAcct = {};
+  for (const c of candidates) {
+    const a = c.rec.account, key = `${c.email}#${c.touch}`;
+    if (states[a]?.paused || inPlan.has(key) || elsewhere.has(key) || !followUpFits(settings, c.rec, laneOf(settings, a))) continue;
+    (byAcct[a] ||= []).push(c);
+  }
+  const items = [], back = [];
+  for (const [a, list] of Object.entries(byAcct)) {
+    const mine = plan.items.filter((it) => it.account === a), lane = laneOf(settings, a);
+    const limit = Math.min(laneCap(settings, lane), laneFollowUpsPerDay(settings, lane));
+    // Follow-ups the account has today (sent or still to go) count toward its limit.
+    let fu = mine.filter((it) => it.followUp && it.status !== 'skipped' && it.status !== 'deferred').length;
+    // Other follow-ups planned today give up their slot first (the count stays);
+    // then first emails, while the account is under its follow-up limit. Sends
+    // a rushed contact already has today keep their slot.
+    const open = (it) => it.status === 'planned' && !it.rush;
+    const slots = mine.filter((it) => open(it) && it.followUp && !rushNow.has(it.email));
+    for (const it of mine.filter((x) => open(x) && !x.followUp)) { if (fu >= limit) break; slots.push(it); fu++; }
+    slots.slice(0, list.length).forEach((it, i) => {
+      const { email, rec, touch } = list[i], cLane = contactLane(rec);
+      if (!it.followUp) back.push(it);
+      items.push({ ...it, email, template: followupTemplateFor(settings, cLane), followUp: true, touch, company: rec.company || '', rush: true, ...laneTag(cLane) });
+    });
+  }
+  await releaseItems(back);
+  await saveItems(today, items);
+  return { date: today, swapped: items.length, firstEmailsBack: back.length };
+}
+
+// The contacts of one upload: same lane, same upload time.
+async function uploadedTogether(lane, addedAt) {
+  const out = [];
+  let cursor = '0';
+  do {
+    const [next, flat] = await command('HSCAN', K.contacts, cursor, 'COUNT', 500);
+    cursor = String(next);
+    for (let i = 0; i < (flat || []).length; i += 2) {
+      const c = parse(flat[i + 1]);
+      if (c?.email && contactLane(c) === lane && Number(c.addedAt) === addedAt) out.push(c);
+    }
+  } while (cursor !== '0');
+  return out;
+}
+
+// Each email's send record, follow-up rotation score and rush membership.
+async function followUpState(emails) {
+  const out = new Map();
+  for (let i = 0; i < emails.length; i += 300) {
+    const chunk = emails.slice(i, i + 300);
+    const [recs, rushed, ...scores] = await pipeline([['HMGET', K.sent, ...chunk], ['SMISMEMBER', K.fuRush, ...chunk], ...chunk.map((e) => ['ZSCORE', K.fu, e])]);
+    chunk.forEach((e, j) => out.set(e, { rec: parse(recs[j]), rushed: Boolean(Number(rushed[j])), inRotation: scores[j] !== null }));
+  }
+  return out;
+}
+
+// The lane's uploads, newest first, with where their follow-ups stand.
+export async function listUploads(lane, { limit = 12 } = {}) {
+  lane = normLane(lane);
+  const config = await readConfig();
+  const groups = new Map();
+  let cursor = '0';
+  do {
+    const [next, flat] = await command('HSCAN', K.contacts, cursor, 'COUNT', 500);
+    cursor = String(next);
+    for (let i = 0; i < (flat || []).length; i += 2) {
+      const c = parse(flat[i + 1]);
+      if (!c?.email || contactLane(c) !== lane || !c.addedAt) continue;
+      if (!groups.has(c.addedAt)) groups.set(c.addedAt, []);
+      groups.get(c.addedAt).push(c);
+    }
+  } while (cursor !== '0');
+  const uploads = [];
+  for (const [addedAt, cs] of [...groups].sort((a, b) => b[0] - a[0]).slice(0, limit)) {
+    const st = await followUpState(cs.map((c) => c.email));
+    const u = { addedAt, contacts: cs.length, waiting: 0, emailed: 0, ready: 0, rushed: 0, followedUp: 0, replied: 0, bounced: 0, unsubscribed: 0,
+      categories: {}, companies: [], lastFirstEmailAt: null };
+    for (const c of cs) {
+      const { rec, rushed, inRotation } = st.get(c.email);
+      if (c.template) u.categories[c.template] = (u.categories[c.template] || 0) + 1;
+      if (u.companies.length < 3 && c.row?.company && !u.companies.includes(c.row.company)) u.companies.push(c.row.company);
+      if (!rec) { if (c.status !== 'removed' && c.status !== 'skipped') u.waiting++; continue; }
+      u.emailed++;
+      u.lastFirstEmailAt = Math.max(u.lastFirstEmailAt || 0, rec.firstSentAt || 0);
+      const touches = rec.touches?.length || 0;
+      if (touches > 1) u.followedUp++;
+      if (rec.repliedAt) u.replied++;
+      else if (rec.bouncedAt) u.bounced++;
+      else if (rec.unsubscribedAt) u.unsubscribed++;
+      else if (inRotation && touches === 1 && touches < config.maxTouches) { if (rushed) u.rushed++; else u.ready++; }
+    }
+    uploads.push(u);
+  }
+  return { lane, uploads, followUpDays: config.followUpDays };
+}
+
+// Rush the follow-ups of one upload: every contact whose first email is out
+// and whose follow-up is not, still in rotation. Today's plan follows at once:
+// a plan not yet started is rebuilt with them first; a started one hands them
+// its remaining sends.
+export async function rushUpload({ lane, addedAt, now = Date.now() }) {
+  lane = normLane(lane);
+  const settings = await readSettings();
+  const config = await readConfig();
+  const cs = await uploadedTogether(lane, Number(addedAt));
+  if (!cs.length) { const e = new Error('no upload in this lane at that time'); e.status = 400; throw e; }
+  const emails = cs.map((c) => c.email);
+  const st = await followUpState(emails);
+  const reasons = await checkMany(emails, { settings, firstTouch: false });
+  const add = [], skipped = {};
+  let already = 0;
+  const skip = (why) => { skipped[why] = (skipped[why] || 0) + 1; };
+  for (const e of emails) {
+    const { rec, rushed, inRotation } = st.get(e);
+    const touches = rec?.touches?.length || 0;
+    if (!rec) skip('no first email yet');
+    else if (reasons.get(e)) skip(reasons.get(e));
+    else if (touches > 1) skip('follow-up already sent');
+    else if (!inRotation || touches >= config.maxTouches) skip('no follow-up due');
+    else if (rushed) already++;
+    else add.push(e);
+  }
+  for (let i = 0; i < add.length; i += 500) await command('SADD', K.fuRush, ...add.slice(i, i + 500));
+  await invalidatePlans(now, { includeUntouchedToday: true, settings });
+  const today = sendingDay(now, settings);
+  const started = Number(await command('HEXISTS', K.plan(today), 'meta'));
+  // As the tick: today's plan is only built while sending runs.
+  const open = !settings.paused && settings.weekdays.includes(eatWeekday(today)) && now < eatAt(today, dayWindow(settings).cutoff);
+  const diverted = started && open ? await divertTodayToRush(now) : null;
+  const plan = started ? await readPlan(today) : open ? await ensurePlan(today, { now }) : { items: [] };
+  const todayCount = plan.items.filter((it) => it.followUp && it.status === 'planned' && it.rush).length;
+  await addLog({ status: 'rushed', ...laneTag(lane), reason: `Send follow-ups now: ${add.length} lead${add.length === 1 ? '' : 's'} from the ${eatDate(Number(addedAt))} upload; ${todayCount} planned today` });
+  return { lane, addedAt: Number(addedAt), contacts: cs.length, rushed: add.length, already, skipped, today: todayCount,
+    firstEmailsBack: diverted?.firstEmailsBack || 0, date: today };
+}
+
+// Stop rushing one upload: its follow-ups wait the usual followUpDays again.
+// Plans not started yet are rebuilt; a started day's rushed sends that are not
+// due yet are deferred when their time comes.
+export async function unrushUpload({ lane, addedAt, now = Date.now() }) {
+  lane = normLane(lane);
+  const emails = (await uploadedTogether(lane, Number(addedAt))).map((c) => c.email);
+  let removed = 0;
+  for (let i = 0; i < emails.length; i += 500) removed += Number(await command('SREM', K.fuRush, ...emails.slice(i, i + 500))) || 0;
+  if (removed) await invalidatePlans(now, { includeUntouchedToday: true });
+  return { lane, addedAt: Number(addedAt), removed };
 }
 
 // Today's plan, once started, is never rebuilt, so a list uploaded mid-day
@@ -878,6 +1096,8 @@ async function recordSend({ email, account, item, token, row, messageId, logId, 
     ['LPUSH', K.recent(account), email],
     ['LTRIM', K.recent(account), 0, 49],
     more ? ['ZADD', K.fu, now, email] : ['ZREM', K.fu, email],
+    // A rushed contact's follow-up is out: the next one waits as usual.
+    ...(item.followUp ? [['SREM', K.fuRush, email]] : []),
   ]);
   return rec;
 }
@@ -985,14 +1205,16 @@ export async function sendItem(item, { now = Date.now(), today: todayArg = null,
     else if (rec.account !== item.account) reason = 'first email came from another account';
     else if (rec.touches.length !== item.touch - 1) reason = 'this touch was already sent';
     else if (rec.touches.length >= config.maxTouches) reason = 'reached max touches';
-    // The test follow-up button skips the wait, for allowlisted addresses only.
-    else if (!(skipWait && allowlisted) && sendingDay(rec.lastSentAt + config.followUpDays * DAY, settings) > today) {
+    // The test follow-up button skips the wait, for allowlisted addresses only;
+    // a rushed upload skips it once their last email is from an earlier sending day.
+    else if (!(skipWait && allowlisted) && sendingDay(rec.lastSentAt + config.followUpDays * DAY, settings) > today
+      && !(sendingDay(rec.lastSentAt, settings) < today && Number(await command('SISMEMBER', K.fuRush, email)))) {
       await saveItem({ ...item, status: 'deferred', reason: 'not due yet' });
       return { status: 'deferred', reason: 'not due yet' };
     } else if (!(st.lastImapOkAt >= now - settings.replyCheckHours * 3600000)) {
       return skipItem('deferred', 'inbox not checked for replies recently; follow-up held back');
     }
-    if (reason) await command('ZREM', K.fu, email);
+    if (reason) await pipeline([['ZREM', K.fu, email], ['SREM', K.fuRush, email]]);
   }
   if (reason) return skipItem('skipped', reason);
 
@@ -1413,19 +1635,33 @@ export async function scanAccount(account, now = Date.now()) {
     await patchAccountState(account, { lastImapAt: now, lastImapError: msg });
     throw new Error(`${account}: ${msg}`);
   }
-  let replies = 0, autoReplies = 0, bounces = 0;
+  let replies = 0, messages = 0, autoReplies = 0, bounces = 0;
   const feed = [], tg = [];   // tg: real replies for the Telegram notice
-  for (const r of found.replies) {
+  // Oldest first: a person's first message is their reply; anything newer
+  // from them is a new message in the conversation (lastReplyAt). The reply
+  // rate counts people, so only the first sets repliedAt.
+  for (const r of [...found.replies].sort((a, b) => a.at - b.at)) {
     const rec = parse(await command('HGET', K.sent, r.email));
-    if (!rec || rec.repliedAt || r.at < rec.firstSentAt) continue;
-    rec.repliedAt = r.at;
-    rec.replySubject = r.subject || '';
-    if (r.from && r.from !== r.email) rec.replyFrom = r.from;
+    if (!rec || r.at < rec.firstSentAt) continue;
+    const again = Boolean(rec.repliedAt);
+    if (again && !(r.at > (rec.lastReplyAt || rec.repliedAt))) continue;
+    const from = r.from && r.from !== r.email ? r.from : '';
+    if (again) {
+      rec.lastReplyAt = r.at;
+      rec.lastReplySubject = r.subject || '';
+      rec.replyCount = (rec.replyCount || 1) + 1;
+    } else {
+      rec.repliedAt = r.at;
+      rec.replySubject = r.subject || '';
+      if (from) rec.replyFrom = from;
+    }
+    if (r.messageId) rec.replyMessageId = r.messageId;
     await pipeline([['HSET', K.sent, r.email, JSON.stringify(rec)], ['ZREM', K.fu, r.email]]);
-    await addLog({ account, to: r.email, status: 'replied', subject: r.subject, templateId: rec.template, ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
-    feed.push({ email: r.email, at: r.at, account, subject: r.subject || '', ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
-    tg.push({ email: r.email, at: r.at, account, subject: r.subject || '', company: rec.company || '', ...(rec.replyFrom ? { from: rec.replyFrom } : {}) });
-    replies++;
+    const who = from ? { from } : {}, more = again ? { again: true } : {};
+    await addLog({ account, to: r.email, status: 'replied', subject: r.subject, templateId: rec.template, ...who, ...more });
+    feed.push({ email: r.email, at: r.at, account, subject: r.subject || '', ...who, ...more });
+    tg.push({ email: r.email, at: r.at, account, subject: r.subject || '', company: rec.company || '', ...who, ...more });
+    if (again) messages++; else replies++;
   }
   // An out-of-office is not an answer: it is kept apart from the reply rate
   // and does not stop the follow-ups.
@@ -1457,7 +1693,7 @@ export async function scanAccount(account, now = Date.now()) {
   }
   await patchAccountState(account, { lastImapAt: now, lastImapOkAt: now, lastImapError: null });
   if (bounces) await checkBounceAutoPause(account, now);
-  return { account, replies, autoReplies, bounces };
+  return { account, replies, messages, autoReplies, bounces };
 }
 
 // Inboxes not checked in the last SCAN_EVERY_MIN minutes, oldest first.
@@ -1489,7 +1725,8 @@ export async function scanAll(now = Date.now()) {
     try { results.push(await scanAccount(a, now)); }
     catch (e) { results.push({ account: a, error: String(e.message || e).slice(0, 200) }); }
   }
-  return { results, replies: results.reduce((n, r) => n + (r.replies || 0), 0), autoReplies: results.reduce((n, r) => n + (r.autoReplies || 0), 0),
+  return { results, replies: results.reduce((n, r) => n + (r.replies || 0), 0), messages: results.reduce((n, r) => n + (r.messages || 0), 0),
+    autoReplies: results.reduce((n, r) => n + (r.autoReplies || 0), 0),
     bounces: results.reduce((n, r) => n + (r.bounces || 0), 0), failed: results.filter((r) => r.error).length };
 }
 
@@ -1565,7 +1802,7 @@ export async function followUpsDue(now = Date.now(), days = 7) {
   const placed = {};
   const sendDateOf = (x) => {
     if (!settings.weekdays.length || !x.account) return null;
-    const limit = Math.min(settings.followUpsPerDay, laneCap(settings, laneOf(settings, x.account)));
+    const limit = Math.min(laneFollowUpsPerDay(settings, laneOf(settings, x.account)), laneCap(settings, laneOf(settings, x.account)));
     const used = (placed[x.account] ||= {});
     let d = x.dueDate < today ? today : x.dueDate;
     for (let i = 0; i < 366 && (!settings.weekdays.includes(eatWeekday(d)) || (used[d] || 0) >= limit); i++) d = addDays(d, 1);

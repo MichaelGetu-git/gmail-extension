@@ -12,10 +12,16 @@
 const URL_ = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
-export const configured = Boolean(URL_ && TOKEN);
+// The second backend: the same commands on Cloud Firestore (_firestore.js),
+// picked with MAILER_STORE=firestore. Upstash stays the default.
+export const backend = String(process.env.MAILER_STORE || '').toLowerCase() === 'firestore' ? 'firestore' : 'upstash';
+const fs = backend === 'firestore' ? await import('./_firestore.js') : null;
+
+export const configured = backend === 'firestore' || Boolean(URL_ && TOKEN);
 
 export async function command(...args) {
   if (!configured) throw new Error('no_store');
+  if (fs) return fs.fsCommand(args);
   const res = await fetch(URL_, {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
@@ -32,6 +38,7 @@ export async function command(...args) {
 export async function pipeline(cmds) {
   if (!configured) throw new Error('no_store');
   if (!cmds.length) return [];
+  if (fs) { const out = []; for (const c of cmds) out.push(await fs.fsCommand(c)); return out; }
   const res = await fetch(`${URL_.replace(/\/$/, '')}/pipeline`, {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },

@@ -387,3 +387,21 @@ td.subj { max-width: 380px; overflow: hidden; text-overflow: ellipsis; }
 .pz-cov .track div { height: 100%; background: var(--pz); border-radius: 0 4px 4px 0; }
 .mail-subject { font-size: 15px; font-weight: 650; margin: 2px 0 10px; }
 @media (max-width: 760px) { .pz-tiles, .pz-bars { grid-template-columns: 1fr; } .pz-row { grid-template-columns: 86px 1fr 48px; } }
+
+/* ------------------------------------------------------------------ conversation (Replies → Reply) */
+.cv-thread { display: flex; flex-direction: column; gap: 10px; max-height: 56vh; overflow: auto; padding: 2px; }
+.cv-msg { border: 1px solid var(--line); border-radius: 12px; padding: 10px 13px; max-width: 88%; background: var(--panel); }
+.cv-msg.in { align-self: flex-start; }
+.cv-msg.out { align-self: flex-end; background: var(--brand-soft); border-color: #dbe5ff; }
+.cv-head { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; font-size: 12.5px; margin-bottom: 4px; }
+.cv-head b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-head .sub { white-space: nowrap; }
+.cv-subj { font-size: 12px; color: var(--text-2); font-weight: 550; margin-bottom: 6px; }
+.cv-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.55; }
+.cv-quote { margin-top: 8px; font-size: 12px; color: var(--text-3); }
+.cv-quote summary { cursor: pointer; user-select: none; }
+.cv-quote .cv-text { font-size: 12.5px; color: var(--text-2); border-left: 2px solid var(--line); padding-left: 10px; margin-top: 6px; }
+.cv-compose { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); }
+.cv-compose textarea { font-family: var(--font); font-size: 14px; line-height: 1.55; }
+.cv-compose .spacer { flex: 1; }
+@media (max-width: 760px) { .cv-msg { max-width: 100%; } }

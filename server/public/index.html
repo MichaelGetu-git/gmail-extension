@@ -292,7 +292,7 @@
         <div class="card">
           <div class="row" style="margin-bottom:14px">
             <input id="lQ" placeholder="Search recipient, subject, error…" style="flex:1;min-width:220px">
-            <select id="lStatus"><option value="">All statuses</option><option>sent</option><option>failed</option><option>bounced</option><option>skipped</option><option>deferred</option><option>dry-run</option><option>replied</option><option>auto-reply</option><option>resumed</option><option>test</option><option>test (dry-run)</option></select>
+            <select id="lStatus"><option value="">All statuses</option><option>sent</option><option>failed</option><option>bounced</option><option>skipped</option><option>deferred</option><option>dry-run</option><option>replied</option><option>answered</option><option>auto-reply</option><option>resumed</option><option>test</option><option>test (dry-run)</option></select>
             <select id="lAcct"><option value="">All accounts</option></select>
             <button class="btn primary" id="lGo">Search</button>
           </div>
@@ -367,6 +367,10 @@
           <div class="card-h"><div><h2 id="lUpTitle">Upload leads (CSV)</h2><p class="cap">Same format as the main upload. Leads go into the lane picked above; someone already in another lane (or the main Contacts list) is skipped with the reason shown, and everyone is checked against every suppression source. You see a preview before anything is imported.</p></div></div>
           <div id="upLeads"></div>
         </div>
+        <div class="card mb">
+          <div class="card-h"><div><h2 id="lUplTitle">Uploaded lists</h2><p class="cap" id="lUplCap">Each upload to this lane, newest first, and where its follow-ups stand. <b>Send follow-ups now</b> sends one list's follow-ups first: they skip the wait (never on the same day as the first email) and take each account's follow-up slots (<i>Of which follow-ups, at most</i>, under Sending options) before other lists' follow-ups; the rest of the daily cap still goes to new leads. Each goes from the account that sent the first email; replies, bounces and unsubscribes are skipped. The follow-up after that waits as usual.</p></div></div>
+          <div class="tbl-wrap"><table id="lUploads" class="nowrap"></table></div>
+        </div>
         <div class="grid g-1-1 mb">
           <div class="card">
             <div class="card-h"><div><h2 id="lOptTitle">Sending options</h2><p class="cap">For this lane only. Saving never changes the pause.</p></div></div>
@@ -377,8 +381,9 @@
             </div>
             <p class="cap" id="lPlainNote" style="margin:8px 0 0"></p>
             <label class="f" style="margin-top:12px">Opt-out sentence <input id="lOptText" maxlength="300"></label>
-            <div class="form" style="margin-top:12px;grid-template-columns:repeat(3,minmax(0,1fr))">
+            <div class="form" style="margin-top:12px;grid-template-columns:repeat(2,minmax(0,1fr))">
               <label class="f"><span>Per account per day (max 40)</span><input id="lCap" type="number" min="1" max="40"></label>
+              <label class="f"><span>Of which follow-ups, at most</span><input id="lFuDay" type="number" min="1" max="40" title="At most this many of an account's daily sends are follow-ups (a rushed list's first); the rest of the daily cap goes to new leads"></label>
               <label class="f">First email template <select id="lTpl" style="width:100%;min-width:0"></select></label>
               <label class="f">Follow-up template <select id="lFuTpl" style="width:100%;min-width:0"><option value="followup">Shared follow-up</option><option value="custom">This lane's own follow-up</option></select></label>
             </div>

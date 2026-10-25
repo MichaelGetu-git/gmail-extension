@@ -75,7 +75,8 @@ the server also needs the env vars below and a trigger.
    the window has already opened), never pushed to tomorrow. Default 15 per account per day, max 40.
    Follow-ups (same account as the first email, `followup` template, after
    `followUpDays`, up to `maxTouches`) come first and count toward the cap,
-   but at most **Follow-ups per account per day** of them (default 5); the
+   but at most **Follow-ups per account per day** of them (default 5; Work and
+   Hot have their own, under the lane's Sending options); the
    rest of the cap goes to new contacts. Follow-ups over that limit wait and
    go out on the next sending days, oldest first, so a big sending day spreads
    its follow-ups over the following days instead of filling one day with
@@ -89,6 +90,32 @@ the server also needs the env vars below and a trigger.
    app password, read-only) when it hasn't been checked for 10 minutes, for
    replies (they are never followed up) and mailer-daemon bounces. See
    *Replies* below.
+
+### Send follow-ups now, for one upload (Hot leads page)
+
+The *Uploaded lists* card lists each upload to the lane (contacts that share
+an upload time), newest first, with how many were emailed, how many wait for a
+follow-up, and how many were followed up, replied or bounced. **Send follow-ups
+now** (`uploads.rush`) sends that one list's follow-ups first:
+
+- they skip the `followUpDays` wait, but never go out on the same sending day
+  as the contact's last email;
+- they take each account's follow-up slots first, oldest first, before other
+  lists' follow-ups: at most the lane's **Of which follow-ups, at most**
+  (Sending options on the Hot leads page, default 5) a day, the rest of the
+  lane's daily cap still going to new leads. A cap of 4 with 2 follow-ups
+  sends 2 of the list's follow-ups and 2 new leads per account per day; set
+  it to the cap to spend the whole day on them;
+- today follows at once: a plan not started yet is rebuilt; a started one
+  hands them its remaining sends at the same times, and the first emails they
+  replace go back to the front of the queue;
+- everything else is the normal follow-up: the account that sent the first
+  email, the lane's follow-up template, every stop rule (replies, bounces,
+  unsubscribes, the inbox check).
+
+Once a contact's follow-up is out it leaves the rush, so the touch after it
+waits the usual `followUpDays`. **Stop** (`uploads.unrush`) puts the list back
+on the usual wait. The rushed contacts are the Redis set `mailer:srv:fu:rush`.
 
 ### Uploading contacts (preview first)
 
@@ -305,6 +332,9 @@ so the extension fills `{{nick_name}}` the same way.
 | Name | What |
 |---|---|
 | `KV_REST_API_URL`, `KV_REST_API_TOKEN` | already set by the Upstash integration |
+| `MAILER_STORE` | optional; `firestore` keeps everything in Cloud Firestore instead of Upstash (see *Firestore instead of Upstash*) |
+| `FIREBASE_SERVICE_ACCOUNT` | with `MAILER_STORE=firestore`: the Firebase service account key, as JSON or base64 of it |
+| `FIRESTORE_DATABASE` | with `MAILER_STORE=firestore`: the named Firestore database (default `mailer`) |
 | `ADMIN_PASSWORD` | the password for the dashboard's admin tabs and template saving |
 | `TEAM_KEY` | must equal the `TEAM_KEY` constant in `background.js`; without it the extension can't read templates, pull opens/unsubscribes from `/api/events`, or exchange suppression lists |
 | `CRON_SECRET` | a long random string; `/api/tick` refuses every call without it |
@@ -396,7 +426,29 @@ npm test                      # needs redis-server; fake SMTP/IMAP, nothing is s
 node test/dev-server.mjs      # http://127.0.0.1:3100, admin password "dev", fake SMTP
 DEV_SEED=1 node test/dev-server.mjs     # the same, filled with realistic sample data
 DEV_NO_ADMIN=1 node test/dev-server.mjs # ADMIN_PASSWORD unset: the sign-in screen says so
+TEST_FIRESTORE=127.0.0.1:8085 npm test  # the same tests on the Firestore backend (firebase emulators:start --only firestore)
 ```
+
+### Firestore instead of Upstash
+
+`MAILER_STORE=firestore` runs the same Redis commands on Cloud Firestore
+(`api/_firestore.js`), for when Upstash is out of reach (its monthly request
+limit, 2026-10). Everything lives in its own named database (`mailer` in the
+Firebase project `fir-project-e99a1`), so a project's `(default)` database is
+never read or written. Pipelines are not atomic there either; the commands
+that must be (the tick lock, the never-twice guard, counters, popping the
+queue) run in Firestore transactions.
+
+Running it from this machine (no Docker needed), with the production env file
+from `vercel env pull` and the service account key in the repository root:
+
+```bash
+node scripts/local-run.mjs --store firestore     # dashboard on 127.0.0.1:3200 + a tick every minute
+node scripts/local-to-firestore.mjs              # one-time copy from the local Redis, then a count check
+```
+
+The other `scripts/local-*` files rebuilt the Work lane from the mailboxes when
+the Upstash data was out of reach; see their headers.
 
 ## Why this isn't part of the Lead Desk
 

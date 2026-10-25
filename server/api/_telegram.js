@@ -2,7 +2,7 @@
 //
 //   TELEGRAM_BOT_TOKEN  the bot's token from @BotFather
 //   TELEGRAM_NOTIFY     who gets the notices: Telegram usernames and/or numeric
-//                       chat ids, comma-separated (default: st_miki)
+//                       chat ids, separated by commas or spaces (default: st_miki)
 //
 // A bot can only message someone who has sent it /start. Usernames are turned
 // into chat ids from the bot's recent updates (getUpdates) the first time and
@@ -17,7 +17,8 @@ import { K } from './_settings.js';
 
 export const NOTIFY_EVERY_MIN = 30;
 export const tgConfigured = () => Boolean(String(process.env.TELEGRAM_BOT_TOKEN || '').trim());
-export const tgTargets = () => String(process.env.TELEGRAM_NOTIFY || 'st_miki').split(',')
+// Usernames never contain spaces, so "5185956276 6153340679" is two chat ids.
+export const tgTargets = () => String(process.env.TELEGRAM_NOTIFY || 'st_miki').split(/[\s,;]+/)
   .map((s) => s.trim().replace(/^@/, '')).filter(Boolean);
 
 async function call(method, body) {
@@ -80,7 +81,7 @@ export async function notifyReplies(now, notes = []) {
   const raw = (await command('LRANGE', K.tgPending, 0, 49)) || [];
   const items = raw.map((s) => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
   const more = waiting - raw.length;
-  const line = (r) => `• ${r.from && r.from !== r.email ? `${r.from} (for ${r.email})` : r.email}${r.company ? ` · ${r.company}` : ''}\n  to ${r.account}${r.subject ? `\n  "${String(r.subject).slice(0, 120)}"` : ''}`;
+  const line = (r) => `• ${r.from && r.from !== r.email ? `${r.from} (for ${r.email})` : r.email}${r.company ? ` · ${r.company}` : ''}${r.again ? ' · wrote again' : ''}\n  to ${r.account}${r.subject ? `\n  "${String(r.subject).slice(0, 120)}"` : ''}`;
   const text = `📬 ${waiting} new repl${waiting === 1 ? 'y' : 'ies'}\n\n${items.map(line).join('\n\n')}${more > 0 ? `\n\n…and ${more} more` : ''}\n\nhttps://mailer-tracker.vercel.app/#replies`;
   try {
     const r = await sendTelegram(text);

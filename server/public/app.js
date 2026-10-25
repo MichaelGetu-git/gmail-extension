@@ -43,9 +43,10 @@ const M = { sent: '#4f46e5', opened: '#f97316', replied: '#10b981', bounced: '#e
 const PZ = '#7c3aed', STD = '#0d9488';
 const pzPill = (on) => (on ? ' <span class="pill pz">personalised</span>' : '');
 const STATUS_COLOR = { sent: '#10b981', 'dry-run': '#6366f1', skipped: '#f59e0b', deferred: '#fcd34d', failed: '#ef4444', bounced: '#991b1b',
-  sending: '#2563eb', replied: '#0ea5e9', 'auto-reply': '#a5b4fc', resumed: '#34d399', test: '#94a3b8', 'test (dry-run)': '#cbd5e1', 'test failed': '#fca5a5' };
+  sending: '#2563eb', replied: '#0ea5e9', 'auto-reply': '#a5b4fc', resumed: '#34d399', test: '#94a3b8', 'test (dry-run)': '#cbd5e1', 'test failed': '#fca5a5',
+  answered: '#0284c7', 'answer failed': '#fca5a5' };
 const statusColor = (s) => STATUS_COLOR[s] || '#94a3b8';
-const pillFor = (s) => (s === 'sent' || s === 'replied' || s === 'resumed' ? 'ok' : /fail|bounce/.test(s) ? 'bad' : ['skipped', 'deferred'].includes(s) ? 'warn' : s === 'planned' || s === 'sending' ? 'info' : '');
+const pillFor = (s) => (s === 'sent' || s === 'replied' || s === 'answered' || s === 'resumed' ? 'ok' : /fail|bounce/.test(s) ? 'bad' : ['skipped', 'deferred'].includes(s) ? 'warn' : s === 'planned' || s === 'sending' ? 'info' : '');
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ICON = {
   chart: '<svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>',
@@ -197,7 +198,7 @@ $('signOut').onclick = () => signOut();
 // ---------------------------------------------------------------- shell + routing
 const VIEWS = {
   overview: ['Overview', 'Campaign performance for the emails sent from this dashboard.'],
-  replies: ['Replies', 'Everyone who answered a dashboard email, newest first. Every inbox is checked for replies every few minutes.'],
+  replies: ['Replies', 'Everyone who answered a dashboard email, newest conversation first. Open one to read it and reply from here. Every inbox is checked every few minutes.'],
   templates: ['Templates', 'Edit, preview and roll back the email templates.'],
   sending: ['Sending', 'Pause controls, accounts, schedule and test sends.'],
   queue: ['Queue', "Planned sends, follow-ups and contacts waiting for a first email."],
@@ -601,18 +602,97 @@ function renderReplies(id, items, { compact = false } = {}) {
     $(id).innerHTML = `<tr><td style="border:0;padding:0"><div class="empty">${ICON.inbox}<b>${compact ? 'No replies yet' : 'Nothing here'}</b><span>${compact ? 'Replies to dashboard emails show up here within minutes of arriving.' : 'No replies match.'}</span></div></td></tr>`;
     return;
   }
-  $(id).innerHTML = '<tr><th>Who</th><th>Replied</th><th>To our email</th><th>From account</th><th>Their subject</th><th></th></tr>' + items.map((x) => {
-    const isNew = !x.auto && x.at > seen;
+  $(id).innerHTML = '<tr><th>Who</th><th>Latest message</th><th>To our email</th><th>From account</th><th>Their subject</th><th></th></tr>' + items.map((x) => {
+    const last = x.lastAt || x.at;
+    const isNew = !x.auto && last > seen;
     const who = [x.name, x.company].filter(Boolean).join(' · ');
+    const state = x.auto ? '' : x.waiting ? '<span class="pill warn">needs a reply</span>' : `<span class="pill ok" title="${esc(when(x.answeredAt))}">answered ${esc(ago(x.answeredAt))}</span>`;
     return `<tr class="${isNew ? 'new' : ''}">
       <td class="who"><b>${esc(who || x.email)}</b><span class="sub">${esc(x.email)}${x.from ? ` · answered from ${esc(x.from)}` : ''}</span></td>
-      <td>${esc(when(x.at))}<div class="sub">${esc(ago(x.at))}${isNew ? ' <span class="pill ok">new</span>' : ''}${x.auto ? ' <span class="pill warn">out of office</span>' : ''}</div></td>
+      <td>${esc(when(last))}<div class="sub">${esc(ago(last))}${x.messages > 1 ? ` · ${x.messages} messages` : ''}${isNew ? ' <span class="pill ok">new</span>' : ''}${x.auto ? ' <span class="pill warn">out of office</span>' : ''}</div></td>
       <td><span class="dot" style="background:${segColor(x.template)};margin-right:6px"></span>${esc(TPL_LABEL[x.template] || x.template)}${x.touch > 1 ? ` · touch ${x.touch}` : ''}${pzPill(x.personal)}
         <div class="sub">sent ${esc(when(x.sentAt))}${x.sentAt ? `, answered after ${esc(took(x.at, x.sentAt))}` : ''}</div></td>
       <td><span class="dot" style="background:${acctColor(x.account)};margin-right:6px"></span>${esc(short(x.account))} ${lanePill(x.lane)}</td>
       <td class="subj" title="${esc(x.subject)}">${esc(x.subject || '—')}</td>
-      <td><a class="btn small" href="${esc(gmailLink(x))}" target="_blank" rel="noopener">Open in Gmail</a></td></tr>`;
+      <td><div class="row" style="gap:6px;flex-wrap:nowrap">${state}<button class="btn small ${x.auto ? '' : 'primary'}" data-convo="${esc(x.email)}">${x.auto ? 'View' : 'Reply'}</button>
+        <a class="btn small ghost" href="${esc(gmailLink(x))}" target="_blank" rel="noopener" title="Open in Gmail">Gmail</a></div></td></tr>`;
   }).join('');
+}
+for (const id of ['rpT', 'ovReplies']) {
+  $(id).addEventListener('click', (e) => { const b = e.target.closest('[data-convo]'); if (b) openConversation(b.dataset.convo); });
+}
+
+// ---------------------------------------------------------------- one conversation
+// Our emails, their messages and our answers, oldest first, with a box to
+// answer from the account that emailed them. Unsent answers are kept while the
+// page is open, so closing the window by accident loses nothing.
+const drafts = new Map();
+let convoSeq = 0;
+async function openConversation(email) {
+  const seq = ++convoSeq;
+  $('mTitle').textContent = email;
+  $('mBody').innerHTML = '<div class="empty" style="min-height:140px"><div class="spinner"></div><span>Reading the mailbox…</span></div>';
+  $('modal').classList.remove('hidden');
+  try {
+    const c = await api('conversation.get', { email });
+    if (seq === convoSeq) renderConversation(c);
+  } catch (e) {
+    if (e instanceof AuthError) return handleErr(e);
+    if (seq === convoSeq) $('mBody').innerHTML = `<div class="msg bad"><span>${esc(e.message)}</span></div>`;
+  }
+}
+function convoMsg(c, m) {
+  const ours = m.dir === 'out';
+  const label = !ours ? (m.fromName ? `${m.fromName} <${m.from}>` : m.from)
+    : `${short(c.account)} · ${m.kind === 'touch' ? (m.touch > 1 ? `follow-up ${m.touch - 1}` : 'first email') : m.kind === 'answer' ? 'answered here' : 'sent from the mailbox'}`;
+  return `<div class="cv-msg ${ours ? 'out' : 'in'}">
+    <div class="cv-head"><b>${esc(label)}</b><span class="sub">${esc(when(m.at))}</span></div>
+    ${m.subject ? `<div class="cv-subj">${esc(m.subject)}</div>` : ''}
+    <div class="cv-text">${m.text ? esc(m.text) : '<span class="sub">(no text)</span>'}</div>
+    ${m.quoted ? `<details class="cv-quote"><summary>Quoted text</summary><div class="cv-text">${esc(m.quoted)}</div></details>` : ''}
+  </div>`;
+}
+function renderConversation(c) {
+  $('mTitle').textContent = [c.name, c.company].filter(Boolean).join(' · ') || c.email;
+  const from = c.senderName ? `${c.senderName} <${c.account}>` : c.account;
+  const why = !c.repliedAt ? (c.autoReplyAt ? 'Only an out-of-office came back, so there is nothing to answer.' : 'They have not replied, so there is nothing to answer.')
+    : `There is no app password for ${c.account}, so it can't send.`;
+  $('mBody').innerHTML = `
+    <div class="sub" style="margin:-4px 0 12px">${esc(c.email)} · emailed from ${esc(c.account)} ${lanePill(c.lane)}</div>
+    ${c.mailboxError ? `<div class="msg warn"><span>Couldn't read the mailbox, so their messages may be missing here: ${esc(c.mailboxError)}</span></div>` : ''}
+    <div class="cv-thread" id="cvThread">${c.messages.map((m) => convoMsg(c, m)).join('') || '<div class="sub">Nothing to show.</div>'}</div>
+    ${c.canAnswer ? `<div class="cv-compose">
+      <div class="sub">To <b>${esc(c.draft.to)}</b> · from <b>${esc(from)}</b> · ${esc(c.draft.subject)}</div>
+      <textarea id="cvText" rows="7" maxlength="10000" placeholder="Write your reply…">${esc(drafts.get(c.email) || '')}</textarea>
+      <div class="row"><span class="sub">Goes out right away as a normal reply in the same thread (plain text, their last message quoted under it). Ctrl+Enter sends.</span>
+        <div class="spacer"></div><button class="btn primary" id="cvSend">Send reply</button></div>
+      <div id="cvStatus"></div></div>` : `<div class="msg warn" style="margin-top:12px"><span>${esc(why)}</span></div>`}`;
+  const th = $('cvThread'); th.scrollTop = th.scrollHeight;
+  if (!c.canAnswer) return;
+  const box = $('cvText'), btn = $('cvSend');
+  box.addEventListener('input', () => drafts.set(c.email, box.value));
+  box.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') btn.click(); });
+  btn.onclick = async () => {
+    const text = box.value;
+    if (!text.trim()) { toast('Write the reply first.'); box.focus(); return; }
+    if (!confirm(`Send this reply to ${c.draft.to} from ${c.account} now?`)) return;
+    btn.disabled = true; btn.textContent = 'Sending…'; $('cvStatus').innerHTML = '';
+    try {
+      const r = await api('conversation.answer', { email: c.email, text });
+      drafts.delete(c.email);
+      c.messages.push({ dir: 'out', kind: 'answer', ...r.answer, quoted: '' });
+      c.answeredAt = r.answer.at;
+      renderConversation(c);
+      const copy = typeof r.sentCopy === 'string' && r.sentCopy.startsWith('failed') ? ` (no copy in the Sent folder: ${r.sentCopy.slice(8)})` : '';
+      toast(`Reply sent to ${r.answer.to}${copy}`);
+      reload(true);
+    } catch (e) {
+      if (e instanceof AuthError) return handleErr(e);
+      $('cvStatus').innerHTML = `<div class="msg bad" style="margin-top:8px"><span>${esc(e.message)}</span></div>`;
+      btn.disabled = false; btn.textContent = 'Send reply';
+    }
+  };
+  box.focus();
 }
 
 // Replies only arrive through the inbox checks, so say loudly when those stop.
@@ -660,7 +740,7 @@ loaders.replies = async () => {
   const checked = inboxesChecked();
   $('rpSum').textContent = `${fmt(r.matched)} ${noun}${r.matched > r.items.length ? `, newest ${fmt(r.items.length)} shown` : ''}. Inboxes last checked ${checked ? `${when(checked)} (${ago(checked)})` : 'never'}.`;
   // Seen once shown: this visit still highlights what was new.
-  markSeen(Math.max(ov.lastReplyAt || 0, ...r.items.filter((x) => !x.auto).map((x) => x.at)));
+  markSeen(Math.max(ov.lastReplyAt || 0, ...r.items.filter((x) => !x.auto).map((x) => x.lastAt || x.at)));
   await pollReplies();
 };
 $('rpKind').onclick = (e) => { const b = e.target.closest('button[data-kind]'); if (!b) return; rpKind = b.dataset.kind;
@@ -676,7 +756,8 @@ async function scanNow(btn) {
     const r = await api('scan.all');
     if (!r.results.length) toast('No account has an app password yet, so there is no inbox to check.');
     else {
-      const bits = [`${r.replies} new repl${r.replies === 1 ? 'y' : 'ies'}`];
+      const n = r.replies + (r.messages || 0);
+      const bits = [`${n} new repl${n === 1 ? 'y' : 'ies'}${r.messages ? ` (${r.messages} from people who had replied before)` : ''}`];
       if (r.autoReplies) bits.push(`${r.autoReplies} out-of-office`);
       if (r.bounces) bits.push(`${r.bounces} bounce${r.bounces === 1 ? '' : 's'}`);
       toast(`Checked ${r.results.length} inbox${r.results.length === 1 ? '' : 'es'}: ${bits.join(', ')}${r.failed ? `. ${r.failed} failed, see the banner.` : '.'}`);
@@ -693,7 +774,7 @@ async function pollReplies() {
     const r = await api('replies.latest');
     const fresh = r.items.filter((x) => !x.auto && x.at > seenAt());
     setBadge(current === 'replies' ? 0 : new Set(fresh.map((x) => x.email)).size);
-    if (lastNotified != null && r.lastReplyAt > lastNotified && fresh[0]) toast(`New reply from ${fresh[0].email}`);
+    if (lastNotified != null && r.lastReplyAt > lastNotified && fresh[0]) toast(`New ${fresh[0].again ? 'message' : 'reply'} from ${fresh[0].email}`);
     lastNotified = r.lastReplyAt || 0;
   } catch (e) { if (e instanceof AuthError) handleErr(e); }
 }
@@ -1464,7 +1545,7 @@ $('pgGo').onclick = async () => {
 let leadLane = 'work';
 const TPL_FIRST_CHOICES = [['auto', 'Auto: route by CSV, like Regular'], ...TPL.filter(([id]) => id !== 'followup'), ['custom', "This lane's own template"]];
 loaders.leads = async () => {
-  const [o, q, a] = await Promise.all([api('overview'), api('queue.list', { lane: leadLane }), api('analytics'), loadUploadFormat()]);
+  const [o, q, a, up] = await Promise.all([api('overview'), api('queue.list', { lane: leadLane }), api('analytics'), api('uploads.list', { lane: leadLane }), loadUploadFormat()]);
   ov = o; an = a; ACCOUNTS = ov.accounts.map((x) => x.account); sideStatus();
   const L = ov.lanes[leadLane], label = LANE_LABEL[leadLane], X = an.lanes?.[leadLane];
   $('laneWhich').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.lane === leadLane));
@@ -1481,6 +1562,8 @@ loaders.leads = async () => {
   $('lUpTitle').textContent = `Upload leads to the ${label} lane (CSV)`; upLeads.render();
   $('lOptTitle').textContent = `Sending options: ${label} lane`; $('lTestTitle').textContent = `Test batch: ${label} lane`;
   $('lQTitle').textContent = `Waiting in the ${label} lane`; $('lQClear').textContent = `Clear the ${label} queue`;
+  $('lUplTitle').textContent = `Uploaded lists: ${label} lane`;
+  renderUploads(up, L);
   fillLaneForm(L);
   heldBox(leadLane, 'lHeld');
   $('lQCap').textContent = `${fmt(q.total)} lead${q.total === 1 ? '' : 's'} waiting for a first email, oldest first${q.total > q.items.length ? ` (first ${q.items.length} shown)` : ''}`;
@@ -1488,6 +1571,44 @@ loaders.leads = async () => {
     (q.items.length ? q.items.map((x, i) => `<tr><td class="sub">${i + 1}</td><td>${esc(x.email)}</td><td>${esc(x.name)}</td><td>${esc(x.company)}</td>
       <td>${esc(TPL_LABEL[x.template] || x.template)}</td><td>${when(x.addedAt)}</td><td class="n"><button class="btn small ghost" data-lrm="${esc(x.email)}">Remove</button></td></tr>`).join('')
       : `<tr><td colspan="7" style="border:0;padding:0"><div class="empty" style="min-height:110px">${ICON.inbox}<b>No ${label} leads waiting</b><span>Upload a CSV above.</span></div></td></tr>`);
+};
+// The lane's uploads and their follow-ups; "Send follow-ups now" rushes one list.
+let UPLOADS = [];
+function renderUploads(up, L) {
+  UPLOADS = up.uploads || [];
+  const label = LANE_LABEL[leadLane];
+  const cats = (u) => Object.entries(u.categories).sort((x, y) => y[1] - x[1]).map(([t, n]) => `${esc(TPL_LABEL[t] || t)} ${fmt(n)}`).join(' · ');
+  const action = (u) => u.rushed
+    ? `<span class="pill ok">sending ${fmt(u.rushed)} first</span> <button class="btn small ghost" data-unrush="${u.addedAt}">Stop</button>`
+    : u.ready ? `<button class="btn small primary" data-rush="${u.addedAt}">Send follow-ups now</button>` : '<span class="sub">nothing to follow up</span>';
+  $('lUploads').innerHTML = '<tr><th>Uploaded</th><th class="n">Leads</th><th>Categories</th><th class="n">Emailed</th><th class="n">Follow-up waiting</th><th class="n">Followed up</th><th class="n">Replied</th><th class="n">Bounced</th><th></th></tr>' +
+    (UPLOADS.length ? UPLOADS.map((u) => `<tr><td>${when(u.addedAt)}<div class="sub">${esc(u.companies.join(', '))}</div></td><td class="n">${fmt(u.contacts)}</td><td>${cats(u)}</td>
+      <td class="n">${fmt(u.emailed)}${u.waiting ? `<div class="sub">${fmt(u.waiting)} not yet</div>` : ''}</td><td class="n">${fmt(u.ready + u.rushed)}</td><td class="n">${fmt(u.followedUp)}</td>
+      <td class="n">${fmt(u.replied)}</td><td class="n">${fmt(u.bounced)}</td><td class="n">${action(u)}</td></tr>`).join('')
+      : `<tr><td colspan="9" style="border:0;padding:0"><div class="empty" style="min-height:90px">${ICON.inbox}<b>No ${label} uploads yet</b><span>Upload a CSV above.</span></div></td></tr>`);
+  Object.assign($('lUploads').dataset, { cap: L.cap, fuDay: Math.min(L.cap, L.followUpsPerDay), fu: L.followUps ? '1' : '', days: up.followUpDays });
+}
+$('lUploads').onclick = async (e) => {
+  const t = e.target.closest('button[data-rush],button[data-unrush]'); if (!t) return;
+  const label = LANE_LABEL[leadLane], d = $('lUploads').dataset;
+  const u = UPLOADS.find((x) => String(x.addedAt) === (t.dataset.rush || t.dataset.unrush)); if (!u) return;
+  if (t.dataset.rush) {
+    if (!d.fu) return toast(`Follow-ups are switched off for the ${label} lane (Sending options below)`);
+    if (!confirm(`Send follow-ups now to ${u.ready} lead${u.ready === 1 ? '' : 's'} from the ${when(u.addedAt)} upload?
+
+They skip the ${d.days}-day wait (never on the same day as their first email) and go first, starting today: each ${label} account sends up to ${d.fuDay} of them a day, before other lists' follow-ups; the rest of its ${d.cap} a day goes to new leads. Each comes from the account that sent the first email. Replies, bounces and unsubscribes are still skipped.
+
+"Stop" undoes it.`)) return;
+    try {
+      const r = await api('uploads.rush', { lane: leadLane, addedAt: u.addedAt });
+      toast(`${fmt(r.rushed + r.already)} follow-ups go first · ${fmt(r.today)} planned today${r.firstEmailsBack ? ` · ${fmt(r.firstEmailsBack)} first emails back in the queue` : ''}`);
+      reload();
+    } catch (err) { handleErr(err); }
+  } else {
+    if (!confirm(`Stop sending this upload's follow-ups first? They wait the usual ${d.days} days after the first email again.`)) return;
+    try { const r = await api('uploads.unrush', { lane: leadLane, addedAt: u.addedAt }); toast(`${fmt(r.removed)} follow-ups back to the usual wait`); reload(); }
+    catch (err) { handleErr(err); }
+  }
 };
 // Contacts held back at send time for a placeholder problem have left the
 // queue; this says how many, how many render cleanly now, and puts those back.
@@ -1511,7 +1632,7 @@ async function heldBox(lane, id) {
 }
 function fillLaneForm(L) {
   $('lPlain').checked = L.plainText; $('lOpt').checked = L.optOutLine; $('lOptText').value = L.optOutText; $('lFu').checked = L.followUps;
-  $('lCap').value = L.cap;
+  $('lCap').value = L.cap; $('lFuDay').value = L.followUpsPerDay;
   $('lTpl').innerHTML = TPL_FIRST_CHOICES.map(([id, l]) => `<option value="${id}" ${L.template === id ? 'selected' : ''}>${esc(l)}</option>`).join('');
   $('lFuTpl').value = L.followupTemplate;
   $('lCustSub').value = L.custom.subject; $('lCustBody').value = L.custom.body; $('lFuSub').value = L.followupCustom.subject; $('lFuBody').value = L.followupCustom.body;
@@ -1526,7 +1647,7 @@ function laneFormState() {
 }
 for (const id of ['lPlain', 'lOpt', 'lTpl', 'lFuTpl']) $(id).addEventListener('change', laneFormState);
 const laneForm = () => ({ [leadLane]: {
-  plainText: $('lPlain').checked, optOutLine: $('lOpt').checked, optOutText: $('lOptText').value, followUps: $('lFu').checked, cap: +$('lCap').value,
+  plainText: $('lPlain').checked, optOutLine: $('lOpt').checked, optOutText: $('lOptText').value, followUps: $('lFu').checked, cap: +$('lCap').value, followUpsPerDay: +$('lFuDay').value,
   template: $('lTpl').value, followupTemplate: $('lFuTpl').value,
   custom: { subject: $('lCustSub').value, body: $('lCustBody').value }, followupCustom: { subject: $('lFuSub').value, body: $('lFuBody').value } } });
 $('laneWhich').onclick = (e) => {

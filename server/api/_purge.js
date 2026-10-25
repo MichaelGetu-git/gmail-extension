@@ -188,7 +188,7 @@ export async function purgeData(input, { now = Date.now(), alsoOptout = false } 
   let unsubTouched = false;
   for (const email of hit) {
     const f = found.get(email);
-    const cmds = [['HDEL', K.contacts, email], ['HDEL', K.sent, email], ['ZREM', K.fu, email]];
+    const cmds = [['HDEL', K.contacts, email], ['HDEL', K.sent, email], ['ZREM', K.fu, email], ['SREM', K.fuRush, email]];
     for (const lane of Object.keys(f.queues)) cmds.push(['LREM', K.queueOf(lane), 0, email]);
     for (const p of f.plan) cmds.push(['HDEL', p.key, p.field]);
     if (f.tokens.length) cmds.push(['HDEL', K.tokens, ...f.tokens]);

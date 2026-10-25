@@ -1,1 +1,4 @@
 .vercel
+.env*.local
+*.local.json
+local-run.local.log

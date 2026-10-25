@@ -1,4 +1,5 @@
-// Who replied and when, for the dashboard's Replies card and tab.
+// Who replied and when, for the dashboard's Replies card and tab, newest
+// conversation first.
 //
 // The send records are the source of truth (every reply the inbox checks ever
 // recorded, including those from before the replies feed existed); the feed
@@ -16,11 +17,17 @@ function rowOf(r, auto) {
   const t = before[before.length - 1] || touches[0] || {};
   const row = r.row || {};
   const name = row.name || [row.first_name, row.last_name].filter(Boolean).join(' ');
+  // The conversation since: their latest message, and our latest answer from
+  // the dashboard. waiting: they wrote after our last answer (or we never did).
+  const lastAt = auto ? at : Math.max(at, r.lastReplyAt || 0);
+  const answeredAt = auto ? null : (r.answeredAt || null);
   return {
     email: r.email, name: name || '', company: r.company || row.company || '', account: r.account, lane: r.lane || 'regular',
     at, auto, subject: (auto ? r.autoReplySubject : r.replySubject) || '', from: auto ? '' : (r.replyFrom || ''),
     template: t.template || r.template, touch: t.n || before.length || 1, touches: touches.length,
     sentAt: t.at || r.firstSentAt || null, firstSentAt: r.firstSentAt || null, personal: Boolean(touches[0]?.personal),
+    lastAt, messages: auto ? 1 : (r.replyCount || 1), answeredAt, answers: auto ? 0 : (r.answers || []).length,
+    waiting: !auto && !(answeredAt > lastAt),
   };
 }
 
@@ -57,7 +64,7 @@ export async function listReplies({ kind = 'replies', q = '', limit = 200 } = {}
   const needle = String(q || '').trim().toLowerCase();
   const all = rows.length;
   const out = (needle ? rows.filter((x) => `${x.email} ${x.name} ${x.company} ${x.account} ${x.subject} ${x.from}`.toLowerCase().includes(needle)) : rows)
-    .sort((a, b) => b.at - a.at);
+    .sort((a, b) => b.lastAt - a.lastAt);
   return { items: out.slice(0, Math.max(1, Math.min(1000, Number(limit) || 200))), matched: out.length, total: all };
 }
 

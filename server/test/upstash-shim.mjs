@@ -11,14 +11,30 @@ function encode(args) {
   return s;
 }
 
+// A lost Redis connection (redis restarted, Docker stopped) fails the commands
+// waiting on it with an error result, like Upstash would, and reconnects a
+// second later, instead of an unhandled socket error ending the process.
 class Resp {
   constructor(port) {
-    this.sock = net.connect(port, '127.0.0.1');
-    this.buf = Buffer.alloc(0);
+    this.port = port;
     this.queue = [];
-    this.sock.on('data', (d) => { this.buf = Buffer.concat([this.buf, d]); this.drain(); });
+    this.closed = false;
+    this.connect();
   }
-  send(args) { return new Promise((resolve) => { this.queue.push(resolve); this.sock.write(encode(args)); }); }
+  connect() {
+    this.buf = Buffer.alloc(0);
+    this.sock = net.connect(this.port, '127.0.0.1');
+    this.sock.on('data', (d) => { this.buf = Buffer.concat([this.buf, d]); this.drain(); });
+    this.sock.on('error', () => {});   // 'close' follows and handles it
+    this.sock.on('close', () => {
+      for (const resolve of this.queue.splice(0)) resolve({ error: 'ERR redis connection lost' });
+      if (!this.closed) setTimeout(() => this.connect(), 1000);
+    });
+  }
+  send(args) {
+    if (this.sock.destroyed) return Promise.resolve({ error: 'ERR redis not connected' });
+    return new Promise((resolve) => { this.queue.push(resolve); this.sock.write(encode(args)); });
+  }
   drain() {
     while (this.queue.length) {
       const r = this.parse(0);
@@ -79,5 +95,5 @@ export function startShim({ redisPort, port = 0, token = 'test-token' }) {
     });
   });
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, port: server.address().port,
-    close: () => { server.close(); pool.forEach((p) => p.sock.destroy()); }, flush: () => pool[0].send(['FLUSHDB']) })));
+    close: () => { server.close(); pool.forEach((p) => { p.closed = true; p.sock.destroy(); }); }, flush: () => pool[0].send(['FLUSHDB']) })));
 }

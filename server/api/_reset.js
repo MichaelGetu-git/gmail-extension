@@ -17,7 +17,7 @@
 import { command } from './_store.js';
 import { K } from './_settings.js';
 
-export const WIPE_EXACT = [K.contacts, K.queue, K.sent, K.tokens, K.touch, K.fu, K.plans, K.log, K.logBody, K.replies, K.lastReply, K.tgPending, K.tgLast];
+export const WIPE_EXACT = [K.contacts, K.queue, K.sent, K.tokens, K.touch, K.fu, K.fuRush, K.plans, K.log, K.logBody, K.replies, K.lastReply, K.tgPending, K.tgLast];
 export const WIPE_PREFIX = ['mailer:srv:plan:', 'mailer:srv:count:', 'mailer:srv:byacct:', 'mailer:srv:recent:',
   'mailer:srv:last:', 'mailer:srv:tests:', 'mailer:srv:queue:'];   // queue: = the Work and Hot lane queues
 export const KEEP_EXACT = [K.settings, K.acct, K.lock, K.lastTick, K.fixItemIds, 'mailer:config', K.configHistory, K.suppEmails,

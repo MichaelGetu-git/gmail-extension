@@ -10,11 +10,16 @@ import { readFileSync } from 'node:fs';
 import nodemailer from 'nodemailer';
 import { startShim } from './upstash-shim.mjs';
 
+// TEST_FIRESTORE=127.0.0.1:8080 runs everything against the Firestore backend
+// on the Firestore emulator instead (a "demo-" project never reaches Google).
+const FIRESTORE = process.env.TEST_FIRESTORE;
+if (FIRESTORE) Object.assign(process.env, { MAILER_STORE: 'firestore', FIRESTORE_EMULATOR_HOST: FIRESTORE, FIREBASE_PROJECT_ID: 'demo-mailer-test' });
 const REDIS_PORT = Number(process.env.TEST_REDIS_PORT) || 6390 + Math.floor(Math.random() * 500);
-const redis = process.env.TEST_REDIS_PORT ? { kill() {} }
+const redis = process.env.TEST_REDIS_PORT || FIRESTORE ? { kill() {} }
   : spawn('redis-server', ['--port', String(REDIS_PORT), '--save', '', '--appendonly', 'no'], { stdio: 'ignore' });
-await new Promise((r) => setTimeout(r, 400));
-const shim = await startShim({ redisPort: REDIS_PORT, token: 'test-token' });
+if (!FIRESTORE) await new Promise((r) => setTimeout(r, 400));
+const shim = FIRESTORE ? { port: 0, flush: (await import('../api/_firestore.js')).fsFlush, close() {} }
+  : await startShim({ redisPort: REDIS_PORT, token: 'test-token' });
 
 const FAKE_PW = { DANIELLZELALEM: 'fakepw-aaaa-1111', BROOKKDANIELL: 'fakepw-bbbb-2222', BERRYYDANIEL: 'fakepw-cccc-3333', NOAHADANIAL: 'fakepw-dddd-4444' };
 Object.assign(process.env, {
@@ -2017,6 +2022,288 @@ await reset();
   check('plan.swapToday answers through the admin API', (await admin('plan.swapToday', { lane: 'work' })).status === 200);
   delete process.env.GMAIL_APP_PASSWORD_AMY; delete process.env.GMAIL_APP_PASSWORD_BEN;
   await saveSettings({ paused: true });
+}
+
+// ============================================================ "Send follow-ups now" for one upload
+section('Send follow-ups now (uploads.rush): one upload\'s follow-ups skip the wait and go first, never the same day, other lists wait; Stop undoes it');
+await reset();
+{
+  E.setRandom(mulberry(97));
+  const W1 = 'amy@rush-one.example', W2 = 'ben@rush-two.example';
+  process.env.GMAIL_APP_PASSWORD_AMY = 'fakepw-amy'; process.env.GMAIL_APP_PASSWORD_BEN = 'fakepw-ben';
+  await admin('account.add', { account: W1, name: 'Amy', lane: 'work' });
+  await admin('account.add', { account: W2, name: 'Ben', lane: 'work' });
+  await admin('lanes.save', { lanes: { work: { cap: 3 } } });
+  const TECH = Array.from({ length: 6 }, (_, i) => `dev${i}@techco${i}.example`), CALL = Array.from({ length: 8 }, (_, i) => `desk${i}@callco${i}.example`);
+  const csv = (list, tag, vertical) => ['email,first_name,company,vertical,hours_gap,email_status', ...list.map((e, i) => `${e},${tag}${i},${tag} Co ${i},${vertical},closed weekends,valid`)].join('\n');
+  const d0 = '2026-12-11', d1 = '2026-12-14', d2 = '2026-12-15', d3 = '2026-12-16', d4 = '2026-12-17';
+  const tTech = EAT(d0, '07:00'), tCall = EAT(d0, '07:30');
+  await E.uploadContacts(csv(TECH, 'Tech', 'software agency'), { lane: 'work', now: tTech });
+  await E.uploadContacts(csv(CALL, 'Call', 'dental'), { lane: 'work', now: tCall });
+  const inbox = async (d) => { for (const a of [W1, W2]) await S.patchAccountState(a, { lastImapOkAt: EAT(d, '08:00'), lastImapAt: EAT(d, '08:00') }); };
+  const run = async (from, to, stop = () => false) => { let t = from; for (; t <= to && !stop(); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); } return t; };
+  const upl = async () => Object.fromEntries((await E.listUploads('work')).uploads.map((u) => [u.addedAt === tTech ? 'tech' : 'call', u]));
+
+  const early = await E.rushUpload({ lane: 'work', addedAt: tTech, now: EAT(d0, '08:00') });
+  check('before any first email: nothing to rush, and no plan built while paused', early.rushed === 0 && early.skipped['no first email yet'] === 6
+    && !(await E.readPlan(d0)).meta, JSON.stringify(early));
+  await saveSettings({ paused: false });
+  await inbox(d1); await run(EAT(d1, '08:55'), EAT(d1, '18:00'));
+  check('day 1 sends the tech list\'s 6 first emails (cap 3 x 2 accounts)', sim.sent.length === 6 && TECH.every((e) => sim.sent.some((m) => m.to === e)), sim.sent.map((m) => m.to).join());
+  let u = await upl();
+  check('uploads.list: two uploads, newest first, tech has 6 follow-ups waiting, call-centre 8 not emailed yet',
+    (await E.listUploads('work')).uploads[0].addedAt === tCall && u.tech.emailed === 6 && u.tech.ready === 6 && u.tech.rushed === 0 && u.call.waiting === 8 && u.call.emailed === 0
+    && u.tech.categories.tech === 6 && u.call.categories.callcenter === 8, JSON.stringify(u));
+  const same = await E.rushUpload({ lane: 'work', addedAt: tTech, now: EAT(d1, '20:00') });
+  check('rushed the evening of the first emails: 6 in, none planned that same day', same.rushed === 6 && same.today === 0, JSON.stringify(same));
+  const firstOf = Object.fromEntries(await Promise.all(TECH.map(async (e) => [e, JSON.parse(await command('HGET', S.K.sent, e)).account])));
+  const sameDay = await E.sendItem({ id: `${d1}:${W1}:x`, date: d1, account: firstOf[TECH[0]], email: TECH[0], template: 'followup', followUp: true, touch: 2, lane: 'work', at: EAT(d1, '20:00'), status: 'planned' },
+    { now: EAT(d1, '20:00'), today: d1 });
+  check('a rushed follow-up on the same sending day as the first email is not due', sameDay.status === 'deferred' && sameDay.reason === 'not due yet', JSON.stringify(sameDay));
+
+  // Day 2: the call-centre list starts, then the tech list is rushed mid-day.
+  await inbox(d2);
+  await E.unrushUpload({ lane: 'work', addedAt: tTech, now: EAT(d1, '20:01') });
+  let t = await run(EAT(d2, '08:55'), EAT(d2, '18:00'), () => sim.sent.length > 6);
+  const startedPlan = await E.readPlan(d2);
+  const left = startedPlan.items.filter((it) => it.status === 'planned');
+  check('day 2 started on the call-centre list: 1 sent, 5 first emails still planned', sim.sent.length === 7 && left.length === 5 && left.every((it) => !it.followUp && CALL.includes(it.email)), `${sim.sent.length} ${left.map((it) => it.email)}`);
+  const r = await E.rushUpload({ lane: 'work', addedAt: tTech, now: t });
+  const after = await E.readPlan(d2);
+  const rushedToday = after.items.filter((it) => it.status === 'planned' && it.rush);
+  check('rushing a started day: the 5 remaining sends become tech follow-ups, same ids, times and accounts as the first emails', r.rushed === 6 && r.today === 5 && r.firstEmailsBack === 5
+    && rushedToday.length === 5 && rushedToday.every((it) => it.followUp && it.touch === 2 && TECH.includes(it.email) && it.account === firstOf[it.email]
+      && left.some((o) => o.id === it.id && o.at === it.at)), JSON.stringify(r));
+  const q = await command('LRANGE', S.K.queueOf('work'), 0, -1);
+  check('the 5 replaced call-centre leads are back at the front of the Work queue', q.slice(0, 5).sort().join() === left.map((it) => it.email).sort().join() && q.length === 7, q.join());
+  const n2 = sim.sent.length;
+  await run(t, EAT(d2, '18:00'));
+  const fu2 = sim.sent.slice(n2);
+  check('the rest of day 2 sends those 5 follow-ups, each from the account that sent the first email', fu2.length === 5 && fu2.every((m) => TECH.includes(m.to) && m.account === firstOf[m.to]), fu2.map((m) => `${m.account}>${m.to}`).join());
+  check('their follow-ups are out: they left the rush, the sixth is still in it', Number(await command('SCARD', S.K.fuRush)) === 1);
+
+  // Day 3: the last rushed follow-up first, then the call-centre list resumes.
+  const p3 = await E.ensurePlan(d3, { now: EAT(d2, '20:00') });
+  const fu3 = p3.items.filter((it) => it.followUp), first3 = p3.items.filter((it) => !it.followUp);
+  check('day 3: the last tech follow-up first, the cap\'s rest goes to call-centre first emails', fu3.length === 1 && fu3[0].rush && TECH.includes(fu3[0].email) && first3.length === 5 && first3.every((it) => CALL.includes(it.email)),
+    `${fu3.map((it) => it.email)} | ${first3.map((it) => it.email)}`);
+  await inbox(d3); await run(EAT(d3, '08:55'), EAT(d3, '18:00'));
+  u = await upl();
+  check('uploads.list after: tech all followed up, nothing rushed or waiting', u.tech.followedUp === 6 && u.tech.ready === 0 && u.tech.rushed === 0 && Number(await command('SCARD', S.K.fuRush)) === 0, JSON.stringify(u.tech));
+  check('the next tech follow-up (touch 3) waits the usual days: not in day 4', !(await E.ensurePlan(d4, { now: EAT(d3, '20:00') })).items.some((it) => TECH.includes(it.email)));
+
+  // Stop: rushing the call-centre list, then stopping, rebuilds day 4 without it.
+  const rc = await E.rushUpload({ lane: 'work', addedAt: tCall, now: EAT(d3, '20:01') });
+  const p4 = await E.ensurePlan(d4, { now: EAT(d3, '20:01') });
+  check('rushing the call-centre list: its 6 follow-ups take day 4, its 2 unsent leads wait', rc.rushed === 6 && p4.items.filter((it) => it.rush).length === 6 && !p4.items.some((it) => !it.followUp),
+    `${JSON.stringify(rc)} ${p4.items.map((it) => it.email)}`);
+  const stop = await E.unrushUpload({ lane: 'work', addedAt: tCall, now: EAT(d3, '20:02') });
+  const p4b = await E.ensurePlan(d4, { now: EAT(d3, '20:03') });
+  check('Stop: back to the usual wait, day 4 has the 2 unsent call-centre leads and no follow-ups', stop.removed === 6 && !p4b.items.some((it) => it.followUp)
+    && p4b.items.filter((it) => !it.followUp).length === 2, p4b.items.map((it) => `${it.email}${it.followUp ? '*' : ''}`).join());
+  // The lane's own follow-ups per day: 1 of an account's 3 a day is a follow-up (a rushed one first), the rest new leads.
+  check('the lane\'s follow-ups per day: default 5, bounded 1..40', S.cleanLanes(undefined, undefined).work.followUpsPerDay === 5
+    && S.cleanLanes({ work: { followUpsPerDay: 99 } }).work.followUpsPerDay === 40 && S.cleanLanes({ work: { followUpsPerDay: 0 } }).work.followUpsPerDay === 1);
+  await command('SET', S.K.settings, JSON.stringify(S.cleanSettings({ lanes: { work: { followUpsPerDay: 1 } } }, await S.readSettings())));
+  const rc2 = await E.rushUpload({ lane: 'work', addedAt: tCall, now: EAT(d3, '20:04') });
+  const p4c = await E.ensurePlan(d4, { now: EAT(d3, '20:05') });
+  check('follow-ups per day 1 with a cap of 3: each account plans 1 rushed follow-up and the 2 unsent leads still go', rc2.rushed === 6
+    && [W1, W2].every((a) => p4c.items.filter((it) => it.account === a && it.followUp && it.rush).length === 1) && p4c.items.filter((it) => !it.followUp).length === 2,
+    p4c.items.map((it) => `${it.account.split('@')[0]}:${it.email}${it.followUp ? '*' : ''}`).join(' '));
+  const all = sim.sent.map((s) => `${s.to}|${s.subject}`);
+  check('nobody got the same email twice', new Set(all).size === all.length);
+  const viaApi = await admin('uploads.list', { lane: 'work' });
+  check('uploads.list answers through the admin API', viaApi.status === 200 && viaApi.json.uploads.length === 2, viaApi.raw);
+  check('uploads.rush refuses an unknown upload', (await admin('uploads.rush', { lane: 'work', addedAt: 123 })).status === 400);
+  delete process.env.GMAIL_APP_PASSWORD_AMY; delete process.env.GMAIL_APP_PASSWORD_BEN;
+  await saveSettings({ paused: true });
+}
+
+// ============================================================ conversations: reading and answering replies from the dashboard
+section('Conversations: a later message from someone who replied counts, the thread reads from the mailbox, answers go out in the same thread');
+await reset();
+{
+  E.setRandom(mulberry(91));
+  const { Readable } = await import('node:stream');
+  const C = await import('../api/_conversation.js');
+  const I = await import('../api/_imap.js');
+  const TG = await import('../api/_telegram.js');
+
+  // Pure helpers first.
+  const g = C.splitQuote('Thanks, sounds good.\n\nOn Mon, 19 Oct 2026 at 10:00, Dawit <d@x.example>\nwrote:\n> Hi Pat\n> more');
+  const o = C.splitQuote('Yes please.\r\n\n-----Original Message-----\nFrom: Dawit\nSent: Monday');
+  const tail = C.splitQuote('Call me.\n> earlier line\n> another');
+  check('splitQuote: Gmail\'s "On … wrote:" (even wrapped), Outlook\'s "Original Message", a trailing "> " block', g.text === 'Thanks, sounds good.' && /^On Mon/.test(g.quoted)
+    && o.text === 'Yes please.' && /^-----Original/.test(o.quoted) && tail.text === 'Call me.' && tail.quoted === '> earlier line\n> another'
+    && C.splitQuote('Just text, On a line\nthat mentions nothing').quoted === '' && C.splitQuote('> only a quote').text === '> only a quote', JSON.stringify([g, o, tail]));
+  check('htmlToText: blocks become lines, tags and scripts go, entities decode', I.htmlToText('<style>p{}</style><p>Hi&nbsp;there &amp; you</p><div>Line&#33; two<br>three</div><script>x()</script>')
+    === 'Hi there & you\nLine! two\nthree');
+  check('reSubject adds "Re:" once', C.reSubject('Quick question') === 'Re: Quick question' && C.reSubject('RE: Quick question') === 'RE: Quick question' && C.reSubject('AW: x') === 'AW: x');
+  const tgWas = process.env.TELEGRAM_NOTIFY;
+  process.env.TELEGRAM_NOTIFY = '@5185956276 6153340679';
+  const t1 = TG.tgTargets().join();
+  process.env.TELEGRAM_NOTIFY = '5185956276, @st_miki;6153340679';
+  const t2 = TG.tgTargets().join();
+  if (tgWas === undefined) delete process.env.TELEGRAM_NOTIFY; else process.env.TELEGRAM_NOTIFY = tgWas;
+  check('TELEGRAM_NOTIFY: chat ids separated by spaces, commas or semicolons, with or without "@"', t1 === '5185956276,6153340679' && t2 === '5185956276,st_miki,6153340679', `${t1} | ${t2}`);
+
+  await admin('contacts.upload', { csv: makeCsv(4, { prefix: 'cv' }) });
+  await saveSettings({ paused: false, perAccountCap: 1 });
+  const d1 = '2026-10-19';
+  for (let t = EAT(d1, '08:55'); t <= EAT(d1, '18:00'); t += 60000) { sim.now = t; await E.tick({ now: t, scan: false }); }
+  await saveSettings({ paused: true });
+  const rec = async (e) => JSON.parse(await command('HGET', S.K.sent, e));
+  check('setup: 4 first emails, one per account', sim.sent.length === 4, String(sim.sent.length));
+  const [A, B, Cc] = sim.sent.map((m) => m.to);
+  const rA = await rec(A), rB = await rec(B);
+  const acct = rA.account, touchId = rA.touches[0].messageId;
+  const firstSubject = sim.sent[0].subject;
+
+  // A fake mailbox per account: real search terms (substring matches, like IMAP), envelopes, body parts.
+  const box = {}, appended = [];
+  let failRead = false;
+  const put = (account, { from, name = '', to, subject, id, inReplyTo = '', refs = '', at, text, html = false }) => {
+    const l = (box[account] ||= []);
+    l.push({ uid: l.length + 1, envelope: { from: [{ address: from, name }], to: [{ address: to }], subject, messageId: id, inReplyTo },
+      internalDate: new Date(at), headers: Buffer.from(refs ? `References: ${refs}\r\n\r\n` : '\r\n'),
+      bodyStructure: html ? { type: 'text/html' } : { type: 'multipart/alternative', childNodes: [{ type: 'text/plain', part: '1' }, { type: 'text/html', part: '2' }] },
+      body: text });
+  };
+  setImapFactory((account) => {
+    const all = () => box[account] || [];
+    return {
+      async connect() {}, async logout() {},
+      async list() { return [{ path: 'INBOX', specialUse: '\\Inbox' }, { path: 'Sent', specialUse: '\\Sent' }, { path: '[Gmail]/All Mail', specialUse: '\\All' }]; },
+      async getMailboxLock() { return { release() {} }; },
+      async search(q) {
+        if (failRead) throw new Error('Invalid credentials (Failure)');
+        return all().filter((m) => {
+          const f = m.envelope.from[0].address, to = m.envelope.to.map((x) => x.address);
+          if (q.not?.from && f.includes(q.not.from)) return false;
+          if (q.or && !q.or.some((x) => (x.from && f.includes(x.from)) || (x.to && to.some((a) => a.includes(x.to))))) return false;
+          return true;
+        }).map((m) => m.uid);
+      },
+      async *fetch(uids) { for (const m of all()) if (uids.includes(m.uid)) yield m; },
+      async fetchOne() { return null; },
+      async download(uid, part) {
+        const m = all().find((x) => x.uid === uid);
+        return m && part === '1' ? { content: Readable.from([Buffer.from(m.body, 'utf8')]) } : {};
+      },
+      async append(path, raw, flags) { appended.push({ account, path, raw: raw.toString(), flags }); },
+    };
+  });
+  const at = (d, hhmm) => EAT(d, hhmm);
+  // Gmail's All Mail holds our own copy of the first email.
+  put(acct, { from: acct, to: A, subject: firstSubject, id: touchId, at: rA.touches[0].at, text: 'our copy' });
+  put(acct, { from: A, name: 'Pat Smith', to: acct, subject: `Re: ${firstSubject}`, id: '<r1@cvco0.example>', inReplyTo: touchId, refs: touchId, at: at('2026-10-20', '09:00'),
+    text: `Sounds interesting, what does it cost?\r\n\r\nOn Mon, 19 Oct 2026 at 10:00, Dawit <${acct}> wrote:\r\n> Hi Pat0,\r\n> earlier` });
+  let sc = (await admin('scan.all')).json;
+  check('the first message is a reply (a new person)', sc.replies === 1 && sc.messages === 0 && (await rec(A)).repliedAt === at('2026-10-20', '09:00')
+    && (await rec(A)).replyMessageId === '<r1@cvco0.example>', JSON.stringify(sc));
+  // They write again: before, this was dropped and "Check inboxes" said 0 new.
+  put(acct, { from: A, name: 'Pat Smith', to: acct, subject: `Re: ${firstSubject}`, id: '<r2@cvco0.example>', inReplyTo: '<r1@cvco0.example>',
+    refs: `${touchId} <r1@cvco0.example>`, at: at('2026-10-20', '15:00'), text: '<p>Also,&nbsp;do you work weekends?</p><div>Pat</div>', html: true });
+  const tgBefore = Number(await command('LLEN', S.K.tgPending));
+  sc = (await admin('scan.all')).json;
+  const a2 = await rec(A);
+  const feed0 = JSON.parse((await command('LRANGE', S.K.replies, 0, 0))[0]);
+  const tgLast = JSON.parse((await command('LRANGE', S.K.tgPending, -1, -1))[0]);
+  check('a later message from someone who replied counts as new, not as another person', sc.replies === 0 && sc.messages === 1
+    && a2.repliedAt === at('2026-10-20', '09:00') && a2.lastReplyAt === at('2026-10-20', '15:00') && a2.replyCount === 2 && a2.replyMessageId === '<r2@cvco0.example>', JSON.stringify(sc));
+  check('…it reaches the badge feed and the Telegram notice, marked as writing again', feed0.again === true && feed0.email === A
+    && Number(await command('LLEN', S.K.tgPending)) === tgBefore + 1 && tgLast.again === true
+    && Number(await command('GET', S.K.lastReply)) === at('2026-10-20', '15:00'));
+  check('…and scanning again records nothing twice; the reply rate still counts the person once', (await admin('scan.all')).json.messages === 0
+    && (await admin('analytics')).json.totals.replied === 1);
+  let rl = (await admin('replies.list')).json.items.find((x) => x.email === A);
+  check('replies.list: latest message, 2 messages, needs an answer', rl.lastAt === at('2026-10-20', '15:00') && rl.at === at('2026-10-20', '09:00')
+    && rl.messages === 2 && rl.waiting === true && rl.answers === 0 && rl.answeredAt === null, JSON.stringify(rl));
+
+  // Sent from Gmail itself, and someone whose address merely contains A's (IMAP matches substrings).
+  put(acct, { from: acct, to: A, subject: `Re: ${firstSubject}`, id: '<gm1@mail.gmail.com>', at: at('2026-10-20', '12:00'), text: 'Answered from Gmail directly.' });
+  put(acct, { from: `x${A}`, to: acct, subject: 'Unrelated', id: '<other@x.example>', at: at('2026-10-20', '13:00'), text: 'not them' });
+  let cv = (await admin('conversation.get', { email: A.toUpperCase() })).json;
+  const kinds = cv.messages.map((m) => `${m.dir}:${m.kind}`).join();
+  check('conversation.get: our email, their messages and Gmail-sent mail, oldest first, our own copy once, no look-alike address',
+    kinds === 'out:touch,in:reply,out:mailbox,in:reply' && cv.messages.every((m, i) => !i || m.at >= cv.messages[i - 1].at), kinds);
+  const [m0, m1, , m3] = cv.messages;
+  check('…our email is worded from the send log; their reply has its text with the quoted part apart', m0.subject === firstSubject && m0.text.length > 20 && m0.touch === 1
+    && m1.text === 'Sounds interesting, what does it cost?' && /^On Mon, 19 Oct 2026/.test(m1.quoted) && m1.fromName === 'Pat Smith'
+    && m3.text === 'Also, do you work weekends?\nPat', JSON.stringify([m1, m3]));
+  check('…and says who an answer goes to and with what subject', cv.canAnswer === true && cv.draft.to === A && cv.draft.subject === `Re: ${firstSubject}`
+    && cv.account === acct && cv.email === A && !cv.mailboxError, JSON.stringify(cv.draft));
+
+  const nSent = sim.sent.length;
+  const tAns = at('2026-10-20', '16:00');
+  const ans = await C.sendAnswer({ email: A, text: '\n\nThanks Pat, it is $50 a month.\nAnd yes, weekends too.\n\n', now: tAns });
+  const out = sim.sent.at(-1);
+  check('the answer goes out from the same account, to them, as "Re:" in the same thread', sim.sent.length === nSent + 1 && out.account === acct && out.to === A
+    && out.subject === `Re: ${firstSubject}` && out.mail.inReplyTo === '<r2@cvco0.example>'
+    && out.mail.references.join(' ') === `${touchId} <r1@cvco0.example> <r2@cvco0.example>` && /^In-Reply-To: <r2@cvco0\.example>/m.test(out.raw), JSON.stringify(out.mail.references));
+  check('…plain text, their last message quoted under it, no tracking or unsubscribe header', out.mail.text.startsWith('Thanks Pat, it is $50 a month.\nAnd yes, weekends too.\n\nOn ')
+    && /wrote:\n> Also, do you work weekends\?\n> Pat$/.test(out.mail.text) && !out.mail.html && !/List-Unsubscribe/i.test(out.raw) && !/text\/html/.test(out.raw)
+    && (out.mail.from.address || out.mail.from) === acct && out.mail.messageId === ans.answer.messageId, out.mail.text);
+  const a3 = await rec(A);
+  check('…kept on the send record; the inbox check keeps reading their mail; logged as "answered"', a3.answers.length === 1 && a3.answeredAt === tAns
+    && a3.answers[0].text === 'Thanks Pat, it is $50 a month.\nAnd yes, weekends too.' && Number(await command('ZSCORE', S.K.byAcct(acct), A)) === tAns
+    && (await admin('log.list', { status: 'answered' })).json.items.some((e) => e.to === A && e.subject === `Re: ${firstSubject}`)
+    && appended.length === 0 && ans.sentCopy === null, JSON.stringify(a3.answers));
+  rl = (await admin('replies.list')).json.items.find((x) => x.email === A);
+  check('replies.list: answered, not waiting', rl.waiting === false && rl.answers === 1 && rl.answeredAt === tAns, JSON.stringify(rl));
+  // Gmail files our answer in All Mail too: it shows once.
+  put(acct, { from: acct, to: A, subject: out.subject, id: ans.answer.messageId, at: tAns, text: out.mail.text });
+  cv = (await admin('conversation.get', { email: A })).json;
+  check('the answer shows in the conversation once', cv.messages.filter((m) => m.kind === 'answer').length === 1 && cv.messages.filter((m) => m.dir === 'out').length === 3
+    && cv.answeredAt === tAns, cv.messages.map((m) => m.kind).join());
+  put(acct, { from: A, to: acct, subject: `Re: ${firstSubject}`, id: '<r3@cvco0.example>', inReplyTo: ans.answer.messageId, at: at('2026-10-21', '09:00'), text: 'Great, Thursday works.' });
+  sc = (await admin('scan.all')).json;
+  rl = (await admin('replies.list')).json.items.find((x) => x.email === A);
+  check('when they answer back it needs a reply again', sc.messages === 1 && rl.waiting === true && rl.messages === 3 && rl.lastAt === at('2026-10-21', '09:00'));
+
+  // Refusals: nothing is sent.
+  const n0 = sim.sent.length;
+  const r400 = await admin('conversation.answer', { email: Cc, text: 'Hello?' });
+  const r404 = await admin('conversation.answer', { email: 'nobody@nowhere.example', text: 'Hello?' });
+  const rEmpty = await admin('conversation.answer', { email: A, text: '  \n ' });
+  const rLong = await admin('conversation.answer', { email: A, text: 'x'.repeat(C.ANSWER_MAX + 1) });
+  const rGet404 = await admin('conversation.get', { email: 'nobody@nowhere.example' });
+  check('no answer to someone who has not replied, an unknown address, an empty or an over-long text', r400.status === 400 && /hasn't replied/.test(r400.json.error)
+    && r404.status === 404 && rEmpty.status === 400 && rLong.status === 400 && rGet404.status === 404 && sim.sent.length === n0,
+  [r400.status, r404.status, rEmpty.status, rLong.status, rGet404.status].join());
+  const cvC = (await admin('conversation.get', { email: Cc })).json;
+  check('someone who has not replied: the conversation shows, with no answer box', cvC.canAnswer === false && cvC.messages.length === 1 && cvC.messages[0].kind === 'touch');
+  // SMTP refuses: nothing recorded, the reason logged.
+  sim.behaviour[acct] = 'auth';
+  const rAuth = await admin('conversation.answer', { email: A, text: 'Another note' });
+  delete sim.behaviour[acct];
+  check('a refused login: 502 "not sent", no answer kept, logged as "answer failed"', rAuth.status === 502 && /^not sent/.test(rAuth.json.error)
+    && (await rec(A)).answers.length === 1 && (await admin('log.list', { status: 'answer failed' })).json.items.some((e) => e.to === A), rAuth.raw);
+  // The mailbox can't be read: the conversation still shows ours, and an answer still threads on what the inbox check recorded.
+  failRead = true;
+  const cvF = (await admin('conversation.get', { email: A })).json;
+  const ansF = await C.sendAnswer({ email: A, text: 'Sending the details now.', now: at('2026-10-21', '10:00') });
+  failRead = false;
+  const outF = sim.sent.at(-1);
+  check('mailbox unreadable: our emails and answers still show, with the reason', /Invalid credentials/.test(cvF.mailboxError || '')
+    && cvF.messages.map((m) => m.kind).join() === 'touch,answer' && cvF.canAnswer === true, JSON.stringify(cvF.messages.map((m) => m.kind)));
+  check('…and an answer still goes in the thread: In-Reply-To the last recorded reply, References our emails', ansF.ok && outF.mail.inReplyTo === '<r3@cvco0.example>'
+    && outF.mail.references.includes(touchId) && outF.mail.references.includes('<r3@cvco0.example>') && outF.mail.text === 'Sending the details now.'
+    && /Invalid credentials/.test(ansF.mailboxError || ''), JSON.stringify(outF.mail.references));
+  // A mail server other than Google's: a copy goes in its Sent folder.
+  put(rB.account, { from: B, to: rB.account, subject: 'Re: hello', id: '<b1@cvco1.example>', at: at('2026-10-20', '11:00'), text: 'Tell me more.' });
+  await admin('scan.all');
+  process.env.MAIL_SERVER_GMAIL_COM = 'mail.example.test';
+  const ansB = await admin('conversation.answer', { email: B, text: 'Here is more.' });
+  delete process.env.MAIL_SERVER_GMAIL_COM;
+  check('another mail server: the answer is also put in its Sent folder, marked read, same Message-ID', ansB.status === 200 && ansB.json.sentCopy === 'Sent'
+    && appended.length === 1 && appended[0].account === rB.account && appended[0].path === 'Sent' && appended[0].flags.includes('\\Seen')
+    && appended[0].raw.includes(`Message-ID: ${ansB.json.answer.messageId}`) && appended[0].raw.includes('Here is more.') && appended[0].raw.includes('In-Reply-To: <b1@cvco1.example>'), ansB.raw);
+  // Deleting test data takes the answers with it.
+  await admin('data.purge', { emails: [A], confirm: 'DELETE' });
+  check('data.purge removes the conversation and its log entries', !(await command('HGET', S.K.sent, A))
+    && !(await command('LRANGE', S.K.log, 0, -1)).some((j) => JSON.parse(j).to === A));
+  setImapFactory(() => ({ async connect() {}, async logout() {}, async getMailboxLock() { return { release() {} }; }, async search() { return []; }, async *fetch() {}, async fetchOne() { return null; } }));
 }
 
 console.log(`\n${passes} passed, ${failures} failed`);

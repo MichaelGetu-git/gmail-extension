@@ -18,6 +18,7 @@ export const K = {
   tokens: 'mailer:srv:tokens',           // hash token -> email (server-sent mail only)
   touch: 'mailer:srv:touch',             // hash "email#n" -> item id; the never-twice guard
   fu: 'mailer:srv:fu',                   // zset email -> lastSentAt (candidates for a follow-up)
+  fuRush: 'mailer:srv:fu:rush',          // set: next follow-up goes out now, first in line ("Send follow-ups now" for an upload)
   byAcct: (a) => `mailer:srv:byacct:${a}`,   // zset email -> lastSentAt, per sending account
   recent: (a) => `mailer:srv:recent:${a}`,   // list: last 50 recipients, per account
   last: (a) => `mailer:srv:last:${a}`,       // ms of the account's last actual send
@@ -51,9 +52,9 @@ export const LANE_LABEL = { regular: 'Regular', work: 'Work', hot: 'Hot' };
 export const DEFAULT_OPTOUT = "If you'd rather not hear from me again, just reply and let me know.";
 const LANE_DEFAULTS = {
   regular: { plainText: false, optOutLine: false, optOutText: DEFAULT_OPTOUT },
-  work: { plainText: true, optOutLine: false, optOutText: DEFAULT_OPTOUT, cap: 15, followUps: true,
+  work: { plainText: true, optOutLine: false, optOutText: DEFAULT_OPTOUT, cap: 15, followUps: true, followUpsPerDay: 5,
     template: 'auto', followupTemplate: 'followup', custom: { subject: '', body: '' }, followupCustom: { subject: '', body: '' } },
-  hot: { plainText: true, optOutLine: false, optOutText: DEFAULT_OPTOUT, cap: 15, followUps: true,
+  hot: { plainText: true, optOutLine: false, optOutText: DEFAULT_OPTOUT, cap: 15, followUps: true, followUpsPerDay: 5,
     template: 'auto', followupTemplate: 'followup', custom: { subject: '', body: '' }, followupCustom: { subject: '', body: '' } },
 };
 export const FIRST_TEMPLATE_CHOICES = ['auto', ...TEMPLATE_IDS.filter((t) => t !== 'followup'), 'custom'];
@@ -143,6 +144,9 @@ export function cleanLanes(input, prev) {
     if (lane !== 'regular') {
       o.cap = int(i.cap, 1, CAP_MAX, int(p.cap, 1, CAP_MAX, d.cap));
       o.followUps = bool(i.followUps, bool(p.followUps, d.followUps));
+      // At most this many of an account's daily sends are follow-ups (the lane's
+      // own Follow-ups per account per day); the rest of the cap goes to new leads.
+      o.followUpsPerDay = int(i.followUpsPerDay, 1, CAP_MAX, int(p.followUpsPerDay, 1, CAP_MAX, d.followUpsPerDay));
       o.template = FIRST_TEMPLATE_CHOICES.includes(i.template) ? i.template : FIRST_TEMPLATE_CHOICES.includes(p.template) ? p.template : d.template;
       o.followupTemplate = FOLLOWUP_TEMPLATE_CHOICES.includes(i.followupTemplate) ? i.followupTemplate
         : FOLLOWUP_TEMPLATE_CHOICES.includes(p.followupTemplate) ? p.followupTemplate : d.followupTemplate;
@@ -173,6 +177,7 @@ export const laneOf = (settings, account) => {
 export const contactLane = (c) => (c && LANES.includes(c.lane) ? c.lane : 'regular');
 export const laneOpts = (settings, lane) => cleanLanes(undefined, settings?.lanes)[LANES.includes(lane) ? lane : 'regular'];
 export const laneCap = (settings, lane) => (lane && lane !== 'regular' ? laneOpts(settings, lane).cap : settings.perAccountCap);
+export const laneFollowUpsPerDay = (settings, lane) => (lane && lane !== 'regular' ? laneOpts(settings, lane).followUpsPerDay : settings.followUpsPerDay);
 export const normLane = (v) => (LANES.includes(v) ? v : 'regular');
 
 export function cleanSettings(input = {}, prev = DEFAULT_SETTINGS) {
