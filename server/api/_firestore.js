@@ -18,7 +18,7 @@
 // must be (SET NX, HSETNX, HINCRBY, LPOP, the unlock script) are.
 import { createHash } from 'node:crypto';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
-import { getFirestore, FieldPath } from 'firebase-admin/firestore';
+import { getFirestore, FieldPath, FieldValue } from 'firebase-admin/firestore';
 
 let db = null;
 function store() {
@@ -85,18 +85,36 @@ async function set(key, value, ...rest) {
   const px = opt(rest, 'PX'), ex = opt(rest, 'EX');
   const exp = px !== undefined ? now() + Number(px) : ex !== undefined ? now() + Number(ex) * 1000 : null;
   const doc = { k: String(key), t: 'string', v: String(value), ...(exp ? { exp } : {}) };
-  if (up.includes('NX')) {
-    return store().runTransaction(async (tx) => {
-      const m = await tx.get(ref(key));
-      if (alive(m)) return null;
-      tx.set(ref(key), doc);
-      return 'OK';
-    });
-  }
+  if (up.includes('NX')) return setNX(key, doc);
   const m = await meta(key);
   if (m.exists && m.get('t') !== 'string') await wipe(key);
   await ref(key).set(doc);
   return 'OK';
+}
+
+// The tick lock, without a transaction: twenty-five ticks racing for one
+// document in transactions can time out instead of simply losing. create()
+// fails atomically when the key exists; an expired one is replaced only if it
+// is still the version just read (compare-and-swap on its update time).
+const conflict = (e) => [6, 9].includes(e.code) || /already exists|precondition/i.test(e.message);
+async function setNX(key, doc) {
+  try { await ref(key).create(doc); return 'OK'; } catch (e) { if (!conflict(e)) throw e; }
+  const m = await meta(key);
+  if (!m.exists || alive(m)) return null;
+  try { await ref(key).update({ ...doc, exp: doc.exp ?? FieldValue.delete() }, { lastUpdateTime: m.updateTime }); return 'OK'; }
+  catch (e) { if (conflict(e)) return null; throw e; }
+}
+
+// A transaction that lost to a concurrent one is tried again a few times,
+// after a short random pause, on top of the SDK's own retries.
+async function transact(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await store().runTransaction(fn); }
+    catch (e) {
+      if (attempt >= 4 || !(e.code === 10 || /aborted|contention|lock timeout/i.test(e.message))) throw e;
+      await new Promise((r) => setTimeout(r, 50 + Math.random() * 200 * (attempt + 1)));
+    }
+  }
 }
 
 // ---- hashes
@@ -137,7 +155,7 @@ async function hsetnx(key, field, value) {
 async function hincrby(key, field, by) {
   await prep(key, 'hash');
   const r = sub(key, 'h').doc(did(field));
-  return store().runTransaction(async (tx) => {
+  return transact(async (tx) => {
     const s = await tx.get(r);
     const n = (s.exists ? Number(s.get('v')) || 0 : 0) + Number(by);
     tx.set(r, { f: String(field), v: String(n) });
@@ -253,7 +271,7 @@ async function push(key, values, left) {
   if (!values.length) return count(key, 'l');
   await prep(key, 'list');
   const vs = values.map(String);
-  const pos = await store().runTransaction(async (tx) => {
+  const pos = await transact(async (tx) => {
     const m = await tx.get(ref(key));
     const head = m.get('head') ?? 0, tail = m.get('tail') ?? -1;
     if (left) { tx.update(ref(key), { head: head - vs.length }); return vs.map((_, i) => head - 1 - i); }
@@ -281,7 +299,7 @@ async function lpop(key, n) {
   const m = await meta(key);
   if (!alive(m)) return null;
   const want = n === undefined ? 1 : Number(n);
-  const vals = await store().runTransaction(async (tx) => {
+  const vals = await transact(async (tx) => {
     const docs = (await tx.get(sub(key, 'l').orderBy('p').limit(want))).docs;
     for (const d of docs) tx.delete(d.ref);
     return docs.map((d) => d.get('v'));
@@ -330,6 +348,13 @@ async function expire(key, secs) {
   await ref(key).update({ exp: now() + Number(secs) * 1000 });
   return 1;
 }
+// Redis: -2 no such key, -1 no expiry, else the time left.
+async function ttl(key, unit) {
+  const m = await meta(key);
+  if (!alive(m)) return -2;
+  if (!m.get('exp')) return -1;
+  return Math.max(0, Math.round((m.get('exp') - now()) / unit));
+}
 async function type(key) {
   const m = await meta(key);
   return alive(m) ? m.get('t') : 'none';
@@ -343,25 +368,30 @@ async function scan(cursor, ...rest) {
   const keys = docs.filter((d) => alive(d) && (!re || re.test(d.get('k')))).map((d) => d.get('k'));
   return [docs.length === n ? docs[docs.length - 1].id : '0', keys];
 }
+// Every live key matching a pattern (the tests' secret-hygiene dump).
+async function keys(pattern) {
+  const re = glob(pattern);
+  return (await store().collection('kv').get()).docs.filter((d) => alive(d) && re.test(d.get('k'))).map((d) => d.get('k'));
+}
 // The one script the app runs: release the tick lock only if it is still ours.
 async function evalScript(script, nkeys, key, arg) {
   if (!/redis\.call\('get',KEYS\[1\]\)==ARGV\[1\]/.test(script) || !/redis\.call\('del',KEYS\[1\]\)/.test(script)) {
     throw new Error('EVAL: only the unlock script is supported on Firestore');
   }
-  return store().runTransaction(async (tx) => {
-    const m = await tx.get(ref(key));
-    if (!alive(m) || m.get('v') !== String(arg)) return 0;
-    tx.delete(ref(key));
-    return 1;
-  });
+  const m = await meta(key);
+  if (!alive(m) || m.get('v') !== String(arg)) return 0;
+  try { await ref(key).delete({ lastUpdateTime: m.updateTime }); return 1; }
+  catch (e) { if (conflict(e)) return 0; throw e; }
 }
 
 const COMMANDS = {
-  GET: get, SET: set, DEL: del, EXISTS: exists, EXPIRE: expire, TYPE: type, SCAN: scan, EVAL: evalScript,
+  GET: get, SET: set, DEL: del, EXISTS: exists, EXPIRE: expire, TYPE: type, SCAN: scan, KEYS: keys, EVAL: evalScript,
+  TTL: (k) => ttl(k, 1000), PTTL: (k) => ttl(k, 1),
   HSET: hset, HGET: async (k, f) => (await hmget(k, f))[0], HMGET: hmget, HGETALL: hgetall, HDEL: hdel,
   HSETNX: hsetnx, HINCRBY: hincrby, HSCAN: hscan, HLEN: (k) => count(k, 'h'),
   HEXISTS: async (k, f) => ((await hmget(k, f))[0] === null ? 0 : 1),
   HKEYS: async (k) => (await hgetall(k)).filter((_, i) => i % 2 === 0),
+  HVALS: async (k) => (await hgetall(k)).filter((_, i) => i % 2 === 1),
   SADD: sadd, SREM: srem, SMEMBERS: smembers, SMISMEMBER: smismember, SCARD: (k) => count(k, 's'),
   SISMEMBER: async (k, m) => (await smismember(k, m))[0],
   ZADD: zadd, ZREM: zrem, ZSCORE: zscore, ZRANGEBYSCORE: zrangebyscore, ZRANGE: zrange, ZCARD: (k) => count(k, 'z'),

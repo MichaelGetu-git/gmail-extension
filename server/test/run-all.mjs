@@ -604,7 +604,10 @@ section('12. existing endpoints, auth and secret hygiene');
     globalThis.fetch = realFetch;
     if (savedCtx === undefined) delete globalThis[CTX]; else globalThis[CTX] = savedCtx;
   }
-  check('/api/l serves the logo and records an open', (await command('HEXISTS', 'mailer:opens', 'abcdefghijkl1234')) === 1 && (await command('HEXISTS', 'mailer:opens', 'storedown12345')) === 0);
+  // "Store down" above is a failing fetch, which only takes Upstash down;
+  // Firestore talks gRPC, so there that open is (rightly) recorded.
+  check('/api/l serves the logo and records an open', (await command('HEXISTS', 'mailer:opens', 'abcdefghijkl1234')) === 1
+    && (FIRESTORE || (await command('HEXISTS', 'mailer:opens', 'storedown12345')) === 0));
   // /api/events is tracking data: team key or admin password, nothing else
   const noAuth = await call(handlers.events);
   check('/api/events without auth -> 401 and no data', noAuth.status === 401 && !noAuth.json.opens && !noAuth.json.unsub && !/abcdefghijkl1234/.test(noAuth.raw));
