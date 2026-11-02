@@ -1158,7 +1158,7 @@ async function loadUploadFormat() {
 }
 const csvCell = (v) => (/[",\r\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
 function sampleCsv(fmt) {
-  const cols = ['email', 'first_name', 'last_name', 'company', 'segment', 'vertical', 'title', 'email_status', ...(fmt?.templateColumns || [])];
+  const cols = ['email', 'first_name', 'last_name', 'company', 'segment', 'vertical', 'title', 'country', 'email_status', ...(fmt?.templateColumns || [])];
   const segs = (fmt?.segments || [{ id: 'callcenter' }, { id: 'tech' }, { id: 'va' }]).map((s) => s.id);
   const people = [['jane.doe', 'Jane', 'Doe', 'Doe Dental Clinic', 'dental', 'Practice Manager'], ['sam.lee', 'Sam', 'Lee', 'Lee Law Office', 'legal', 'Partner'],
     ['amir.khan', 'Amir', 'Khan', 'Khan Software Ltd', 'software agency', 'CTO'], ['maria.rossi', 'Maria', 'Rossi', 'Rossi Accounting', 'accounting', 'Owner']];

@@ -122,8 +122,8 @@ on the usual wait. The rushed contacts are the Redis set `mailer:srv:fu:rush`.
 The upload box (*Contacts* tab for the Regular lane, *Hot leads* for Work/Hot)
 takes a CSV by drag-and-drop or the file picker. It lists the columns the
 server reads (`email` required; `first_name`, `last_name`, `name`, `company`,
-`segment`, `vertical`, `title`, `email_status`, plus any column your templates
-use) and offers a **sample CSV** built from those columns and the real
+`segment`, `vertical`, `title`, `country`, `email_status`, plus any column
+your templates use) and offers a **sample CSV** built from those columns and the real
 segments. Before anything is saved it shows a **preview**: file name, row
 count, the first 10 rows with what will happen to each, a column mapping
 (headers like "Email Address" or "Company Name" are matched automatically and
@@ -326,6 +326,10 @@ Next to each name is an optional **nickname**, used wherever a template says
 accounts that need one; an account without a nickname fills `{{nick_name}}`
 with its name. It is saved with the templates (`nicknames` in `/api/config`),
 so the extension fills `{{nick_name}}` the same way.
+
+`{{country}}` is the contact's `country` column exactly as in the sheet (the
+lists hold two-letter codes, so `GB`, `US`, `AE`). A row with an empty
+country is held back like any other empty placeholder.
 
 ### Environment variables (Vercel → Settings → Environment Variables)
 

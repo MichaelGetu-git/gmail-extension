@@ -165,6 +165,14 @@ section('1. rendering is identical to the extension (content.js)');
   check('{{nick_name}} identical: the nickname, else the name, else "The Zemenay team"; {{sender_name}} is the name exactly as set', nickOf('Dawit @ ZemenayTech', 'Mike') === srvNick('Dawit @ ZemenayTech', 'Mike')
     && srvNick('Dawit @ ZemenayTech', 'Mike') === 'Hey, this is Mike.\n\nDawit @ ZemenayTech' && nickOf('Berry', '') === srvNick('Berry', '') && srvNick('Berry', '') === 'Hey, this is Berry.\n\nBerry'
     && nickOf('', '') === srvNick('', '') && srvNick('', '').startsWith('Hey, this is The Zemenay team.'));
+  // {{country}}: the sheet's value exactly as written (two-letter codes)
+  const ctyTpl = { ...DEFAULT_TEMPLATES, tech: { subject: 'teams in {{country}}', body: 'Hi,\n\nTeams in {{country}}.\n\n{{sender_name}}' } };
+  const cr = { email: 'cty@x.example', company: 'Cty Co', segment: 'tech', _segment: 'tech' };
+  const srvCty = (country) => R.renderEmail({ contact: { ...cr, country }, templates: ctyTpl, templateId: 'tech', senderName: 'D', token: 'ctyctycty0000001' });
+  const extCty = (country) => ext.fillTemplate(ctyTpl.tech.subject, ext.withWording({ ...cr, country, sender_name: 'D' }));
+  check('{{country}} is the sheet value as is, in both (GB, US, AE)', ['GB', 'US', 'AE'].every((v) => srvCty(v).subject === `teams in ${v}` && extCty(v) === `teams in ${v}`));
+  check('{{country}} with no country column is missing, with an empty one is empty (held back either way)',
+    srvCty(undefined).problems.missing.includes('country') && srvCty('').problems.empty.includes('country') && srvCty('GB').problems.ok);
   const tok = R.newToken();
   check('tokens match the tracker format', /^[a-z0-9]{16}$/.test(tok) && tok !== R.newToken());
 }

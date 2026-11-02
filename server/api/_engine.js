@@ -119,6 +119,7 @@ export const CONTACT_COLUMNS = [
   { id: 'segment', label: 'Segment', use: 'picks the template: a segment id or label (see below)' },
   { id: 'vertical', label: 'Industry / vertical', use: 'routes to a segment when there is no segment column' },
   { id: 'title', label: 'Job title', use: 'also used for routing' },
+  { id: 'country', label: 'Country', use: '{{country}}, exactly as in the sheet (e.g. GB, US, AE)' },
   { id: 'email_status', label: 'Email status', use: 'if present, only rows with "valid" load (unless "Include unverified rows" is ticked)' },
 ];
 // Other columns the routing reads, and ones with built-in fallbacks.
@@ -133,6 +134,7 @@ const ALIASES = {
   segment: ['segment', 'template'],
   vertical: ['vertical', 'industry', 'sector', 'niche'],
   title: ['title', 'job_title', 'jobtitle', 'position', 'role'],
+  country: ['country', 'country_code', 'country_name', 'company_country', 'hq_country', 'location_country'],
   email_status: ['email_status', 'emailstatus'],
 };
 export const headerKey = (h) => String(h || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
