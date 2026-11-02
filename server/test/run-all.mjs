@@ -165,12 +165,16 @@ section('1. rendering is identical to the extension (content.js)');
   check('{{nick_name}} identical: the nickname, else the name, else "The Zemenay team"; {{sender_name}} is the name exactly as set', nickOf('Dawit @ ZemenayTech', 'Mike') === srvNick('Dawit @ ZemenayTech', 'Mike')
     && srvNick('Dawit @ ZemenayTech', 'Mike') === 'Hey, this is Mike.\n\nDawit @ ZemenayTech' && nickOf('Berry', '') === srvNick('Berry', '') && srvNick('Berry', '') === 'Hey, this is Berry.\n\nBerry'
     && nickOf('', '') === srvNick('', '') && srvNick('', '').startsWith('Hey, this is The Zemenay team.'));
-  // {{country}}: the sheet's value exactly as written (two-letter codes)
+  // {{country}}: a two-letter code fills in as the full name; anything else as written
   const ctyTpl = { ...DEFAULT_TEMPLATES, tech: { subject: 'teams in {{country}}', body: 'Hi,\n\nTeams in {{country}}.\n\n{{sender_name}}' } };
   const cr = { email: 'cty@x.example', company: 'Cty Co', segment: 'tech', _segment: 'tech' };
   const srvCty = (country) => R.renderEmail({ contact: { ...cr, country }, templates: ctyTpl, templateId: 'tech', senderName: 'D', token: 'ctyctycty0000001' });
   const extCty = (country) => ext.fillTemplate(ctyTpl.tech.subject, ext.withWording({ ...cr, country, sender_name: 'D' }));
-  check('{{country}} is the sheet value as is, in both (GB, US, AE)', ['GB', 'US', 'AE'].every((v) => srvCty(v).subject === `teams in ${v}` && extCty(v) === `teams in ${v}`));
+  const ctyWant = { GB: 'United Kingdom', US: 'United States', AE: 'United Arab Emirates', DE: 'Germany', gb: 'United Kingdom', ' fr ': 'France',
+    BA: 'Bosnia and Herzegovina', HK: 'Hong Kong', MM: 'Myanmar', CD: 'Democratic Republic of the Congo', UK: 'United Kingdom',
+    Spain: 'Spain', 'United Kingdom': 'United Kingdom', USA: 'USA', EU: 'EU' };
+  const ctyBad = Object.entries(ctyWant).filter(([v, n]) => srvCty(v).subject !== `teams in ${n}` || extCty(v) !== `teams in ${n}`).map(([v]) => [v, srvCty(v).subject, extCty(v)]);
+  check('{{country}} identical in both: GB -> "United Kingdom", DE -> "Germany", other values as written', !ctyBad.length, JSON.stringify(ctyBad));
   check('{{country}} with no country column is missing, with an empty one is empty (held back either way)',
     srvCty(undefined).problems.missing.includes('country') && srvCty('').problems.empty.includes('country') && srvCty('GB').problems.ok);
   const tok = R.newToken();

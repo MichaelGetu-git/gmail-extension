@@ -327,8 +327,10 @@ accounts that need one; an account without a nickname fills `{{nick_name}}`
 with its name. It is saved with the templates (`nicknames` in `/api/config`),
 so the extension fills `{{nick_name}}` the same way.
 
-`{{country}}` is the contact's `country` column exactly as in the sheet (the
-lists hold two-letter codes, so `GB`, `US`, `AE`). A row with an empty
+`{{country}}` is the contact's `country` column as the full country name: the
+lists hold two-letter codes, so `GB` fills in as "United Kingdom", `US` as
+"United States", `DE` as "Germany". A value that isn't a code ("Spain") is
+used as written, and the stored contact keeps the code. A row with an empty
 country is held back like any other empty placeholder.
 
 ### Environment variables (Vercel → Settings → Environment Variables)

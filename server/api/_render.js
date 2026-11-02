@@ -130,10 +130,30 @@ export function firstNameFor(c) {
   return 'there';
 }
 
+// {{country}}: lists hold the country as a two-letter code ("GB"), so a code
+// fills in as the country's full English name ("United Kingdom", "Germany").
+// Anything else (a name already written out) is used as is. The stored row
+// keeps the code.
+const REGION_NAMES = typeof Intl !== 'undefined' && Intl.DisplayNames
+  ? new Intl.DisplayNames(['en'], { type: 'region', fallback: 'none' }) : null;
+const COUNTRY_FIX = { CD: 'Democratic Republic of the Congo', CG: 'Republic of the Congo', PS: 'Palestine' };
+const NOT_COUNTRIES = new Set(['EU', 'EZ', 'UN', 'QO', 'XA', 'XB', 'ZZ']);
+export function countryName(v) {
+  const raw = String(v ?? '').trim();
+  const code = raw.toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code) || NOT_COUNTRIES.has(code)) return raw;
+  let full = COUNTRY_FIX[code];
+  if (!full) { try { full = REGION_NAMES?.of(code); } catch { full = ''; } }
+  return full ? full.replace(/ & /g, ' and ').replace(/ SAR China$| \([^)]*\)$/, '') : raw;
+}
+
 export function withWording(c) {
   const d = DEFAULT_WORDING[c._segment || routeContact(c)] || DEFAULT_WORDING.callcenter;
   return {
     ...c,
+    // A row without a country column stays without one, so the Check step
+    // still reports {{country}} as missing rather than filling it with nothing.
+    ...(c.country !== undefined && { country: countryName(c.country) }),
     first_name: firstNameFor(c),
     business_type: String(c.business_type || '').trim() || d.business_type,
     pain: String(c.pain || '').trim() || d.pain,

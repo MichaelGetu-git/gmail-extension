@@ -119,7 +119,7 @@ export const CONTACT_COLUMNS = [
   { id: 'segment', label: 'Segment', use: 'picks the template: a segment id or label (see below)' },
   { id: 'vertical', label: 'Industry / vertical', use: 'routes to a segment when there is no segment column' },
   { id: 'title', label: 'Job title', use: 'also used for routing' },
-  { id: 'country', label: 'Country', use: '{{country}}, exactly as in the sheet (e.g. GB, US, AE)' },
+  { id: 'country', label: 'Country', use: '{{country}}: a code like GB fills in as "United Kingdom", DE as "Germany"' },
   { id: 'email_status', label: 'Email status', use: 'if present, only rows with "valid" load (unless "Include unverified rows" is ticked)' },
 ];
 // Other columns the routing reads, and ones with built-in fallbacks.
