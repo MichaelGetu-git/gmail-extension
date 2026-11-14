@@ -13,6 +13,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { configured } from './_store.js';
 import { send } from './_auth.js';
 import { tick } from './_engine.js';
+import { warmupStep } from './warmup.js';
 
 function authorised(req) {
   const secret = process.env.CRON_SECRET;
@@ -28,7 +29,13 @@ export default async function handler(req, res) {
   if (!process.env.CRON_SECRET) return send(res, 503, { error: 'CRON_SECRET is not set' });
   if (!authorised(req)) return send(res, 401, { error: 'not authorised' });
   try {
-    const out = await tick({ now: Date.now() });
+    // The warmup (api/warmup.js) rides on the same trigger, next to the tick: it
+    // is idle unless a round was started, and its failure never fails the tick.
+    const [out, warmup] = await Promise.all([
+      tick({ now: Date.now() }),
+      warmupStep({ now: Date.now() }).catch((err) => ({ error: err.message || 'warmup failed' })),
+    ]);
+    if (warmup) out.warmup = warmup;
     return send(res, 200, out);
   } catch (err) {
     return send(res, 500, { error: err.message || 'tick failed' });
