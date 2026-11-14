@@ -8,7 +8,8 @@
 // - action=init starts a round; the state lives in the store (mailer:warmup:state).
 // - /api/tick calls warmupStep() on every tick, which sends whatever is due,
 //   one email per tick. No separate schedule is needed.
-// - When every group has finished, nothing more is sent until the next init.
+// - When every group has finished, nothing more is sent until the next init,
+//   and a summary goes to the mailer's Telegram chat (_telegram.js).
 // - Independent of the mailer's global pause: outreach can be paused while this runs.
 
 import fs from 'fs';
@@ -16,8 +17,9 @@ import path from 'path';
 import { timingSafeEqual } from 'node:crypto';
 import { command, configured } from './_store.js';
 import { send, body } from './_auth.js';
-import { hasPassword } from './_settings.js';
+import { hasPassword, readSettings, eatClock } from './_settings.js';
 import { transportFor } from './_smtp.js';
+import { tgConfigured, sendTelegram } from './_telegram.js';
 import { THREADS, threadById, turnText } from './_warmup_threads.js';
 
 const STATE_KEY = 'mailer:warmup:state';
@@ -123,6 +125,47 @@ async function readState() {
 
 const finished = (state) => !state?.groups?.length || state.groups.every((g) => g.status === 'completed');
 
+// A finished round that has not been reported on Telegram yet (three tries at most).
+const owesNotice = (state) => Boolean(state?.groups?.length) && finished(state) && !state.notified &&
+  (state.notifyTries || 0) < 3 && tgConfigured();
+
+export function summaryText(state, paused) {
+  const sent = state.groups.flatMap((g) => g.history.filter((h) => h.sentAt));
+  const planned = state.groups.reduce((n, g) => n + 1 + g.responders.length, 0);
+  const people = state.groups.reduce((n, g) => n + 1 + g.recipients.length, 0);
+  const times = sent.map((h) => h.sentAt);
+  const lines = [`Warm-up round finished: ${sent.length} of ${planned} emails sent between ${people} accounts` +
+    (times.length ? `, ${eatClock(Math.min(...times))} to ${eatClock(Math.max(...times))} EAT.` : '.'), ''];
+  for (const g of state.groups) {
+    const ok = g.history.filter((h) => h.sentAt);
+    lines.push(`• ${g.subject}: ${ok.length} of ${1 + g.responders.length}`);
+    const sentTurns = new Set(ok.map((h) => h.turn));
+    const failed = new Map(g.history.filter((h) => h.failedAt && !sentTurns.has(h.turn)).map((h) => [h.turn, h]));
+    for (const h of failed.values()) lines.push(`   not sent: ${h.sender} (${h.error})`);
+  }
+  lines.push('', paused
+    ? 'Outside outreach is still paused. Switch the pause off on the dashboard when you want it back.'
+    : 'Outside outreach is not paused.');
+  return lines.join('\n');
+}
+
+// Reports a finished round once. A failed try is counted and tried again on a
+// later tick; it never undoes or repeats anything the round did.
+async function notifyDone(state, now) {
+  let out;
+  try {
+    const paused = Boolean((await readSettings()).paused);
+    const r = await sendTelegram(summaryText(state, paused));
+    state.notified = now;
+    out = { telegram: `summary sent to ${r.sent} chat(s)` };
+  } catch (err) {
+    state.notifyTries = (state.notifyTries || 0) + 1;
+    out = { telegram: `summary not sent: ${String(err.message).slice(0, 160)}` };
+  }
+  await command('SET', STATE_KEY, JSON.stringify(state));
+  return out;
+}
+
 // One step of the warmup: sends the next due email of at most one group, then
 // saves the state. Called by /api/tick on every tick, so the scheduler that
 // drives the mailer drives this too. Does nothing (returns null) unless a
@@ -132,13 +175,13 @@ const finished = (state) => !state?.groups?.length || state.groups.every((g) => 
 export async function warmupStep({ now = Date.now() } = {}) {
   if (!configured) return null;
   let state = await readState();
-  if (finished(state)) return null;
+  if (finished(state) && !owesNotice(state)) return null;
 
   const lockId = `${now}-${Math.random().toString(36).slice(2)}`;
   if (!(await command('SET', LOCK_KEY, lockId, 'NX', 'PX', 90000))) return { busy: true };
   try {
     state = await readState(); // again, now that the lock is held
-    if (finished(state)) return null;
+    if (finished(state)) return owesNotice(state) ? notifyDone(state, now) : null;
 
     const open = state.groups.filter((g) => g.status !== 'completed');
     const group = open.filter((g) => now >= g.dueAt).sort((a, b) => a.dueAt - b.dueAt)[0];
@@ -201,7 +244,8 @@ export async function warmupStep({ now = Date.now() } = {}) {
 
     state.updatedAt = now;
     await command('SET', STATE_KEY, JSON.stringify(state));
-    return { dispatched, pending, allCompleted: finished(state) };
+    const notice = owesNotice(state) ? await notifyDone(state, now) : {};
+    return { dispatched, pending, allCompleted: finished(state), ...notice };
   } finally {
     if ((await command('GET', LOCK_KEY)) === lockId) await command('DEL', LOCK_KEY);
   }
